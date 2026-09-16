@@ -8,6 +8,145 @@
 void setUp(void) {}
 void tearDown(void) {}
 
+/* ------------------------------------------------------------------------
+ * A scripted in-memory server
+ * ------------------------------------------------------------------------ */
+
+typedef struct {
+    const char *script;   // everything the server will send
+    size_t len;
+    size_t pos;
+    size_t chunk;         // most bytes handed out per read, 0 = no limit
+    bool fail_at_end;     // read fails instead of reporting a hang-up
+    int reads;
+
+    char sent[8192];      // everything the client wrote
+    size_t sent_len;
+    size_t write_chunk;   // most bytes accepted per write, 0 = no limit
+    int fail_write_at;    // this write call fails, 0 = never
+    int writes;
+} mock_t;
+
+static ssize_t mock_read(void *ctx, char *buf, size_t len) {
+    mock_t *m = (mock_t *)ctx;
+    m->reads++;
+    size_t n = m->len - m->pos;
+    if (n == 0 && m->fail_at_end) return -1;
+    if (m->chunk && n > m->chunk) n = m->chunk;
+    if (n > len) n = len;
+    memcpy(buf, m->script + m->pos, n);
+    m->pos += n;
+    return (ssize_t)n;
+}
+
+static ssize_t mock_write(void *ctx, const char *data, size_t len) {
+    mock_t *m = (mock_t *)ctx;
+    m->writes++;
+    if (m->fail_write_at == m->writes) return -1;
+    if (m->write_chunk && len > m->write_chunk) len = m->write_chunk;
+    if (len >= sizeof(m->sent) - m->sent_len) return -1;
+    memcpy(m->sent + m->sent_len, data, len);
+    m->sent_len += len;
+    m->sent[m->sent_len] = '\0';
+    return (ssize_t)len;
+}
+
+static ssize_t failing_read(void *ctx, char *buf, size_t len) {
+    (void)ctx; (void)buf; (void)len;
+    return -1;
+}
+
+static ssize_t oversized_read(void *ctx, char *buf, size_t len) {
+    (void)ctx; (void)buf;
+    return (ssize_t)len + 1;
+}
+
+static ssize_t failing_write(void *ctx, const char *data, size_t len) {
+    (void)ctx; (void)data; (void)len;
+    return -1;
+}
+
+static ssize_t zero_write(void *ctx, const char *data, size_t len) {
+    (void)ctx; (void)data; (void)len;
+    return 0;
+}
+
+static ssize_t oversized_write(void *ctx, const char *data, size_t len) {
+    (void)ctx; (void)data;
+    return (ssize_t)len + 1;
+}
+
+static void mock_start(mock_t *m, transport_t *t, const char *script, size_t chunk) {
+    memset(m, 0, sizeof(*m));
+    m->script = script;
+    m->len = strlen(script);
+    m->chunk = chunk;
+    transport_init(t, mock_read, mock_write, m);
+}
+
+/* The session from the assignment, one reply and one command per step. */
+enum { STEPS = 7 };
+
+static const char *good_replies[STEPS] = {
+    "220 smtp.example.com ESMTP ready\r\n",
+    "250 smtp.example.com\r\n",
+    "250 2.1.0 Ok\r\n",
+    "250 2.1.5 Ok\r\n",
+    "354 End data with <CR><LF>.<CR><LF>\r\n",
+    "250 2.0.0 Ok: queued\r\n",
+    "221 2.0.0 Bye\r\n",
+};
+
+static const char *good_commands[STEPS] = {
+    "",
+    "HELO onyx.boisestate.edu\r\n",
+    "MAIL FROM:<me@boisestate.edu>\r\n",
+    "RCPT TO:<you@example.com>\r\n",
+    "DATA\r\n",
+    "From: me@boisestate.edu\r\n"
+    "To: you@example.com\r\n"
+    "Subject: hello\r\n"
+    "\r\n"
+    "This is the message body.\r\n"
+    ".\r\n",
+    "QUIT\r\n",
+};
+
+static const char *step_names[STEPS] = {
+    "greeting", "HELO", "MAIL FROM", "RCPT TO", "DATA", "end of data", "QUIT"
+};
+
+static const smtp_message_t good_msg = {
+    .helo = "onyx.boisestate.edu",
+    .from = "me@boisestate.edu",
+    .to = "you@example.com",
+    .subject = "hello",
+    .body = "This is the message body.\n", // what echo pipes in
+};
+
+// The server's side of the session: the replies before step `upto`, then
+// `replacement` in place of the reply to that step (NULL to stop there),
+// then the rest of the replies.
+static void build_script(char *out, size_t size, int upto, const char *replacement) {
+    out[0] = '\0';
+    for (int i = 0; i < STEPS; i++) {
+        const char *r = good_replies[i];
+        if (i == upto) {
+            if (!replacement) break;
+            r = replacement;
+        }
+        strncat(out, r, size - strlen(out) - 1);
+    }
+}
+
+// What the client should have sent by the time it reads the reply to `step`.
+static void build_transcript(char *out, size_t size, int step) {
+    out[0] = '\0';
+    for (int i = 1; i <= step && i < STEPS; i++) {
+        strncat(out, good_commands[i], size - strlen(out) - 1);
+    }
+}
+
 void test_get_greeting(void) {
   char *greeting = get_greeting("Alice");
   TEST_ASSERT_NOT_NULL(greeting);
@@ -227,6 +366,675 @@ void test_build_data_payload(void) {
     TEST_ASSERT_NULL(build_data_payload("me@example.com", "you@example.com", "hi\r\nBcc: x", "b"));
 }
 
+/* ------------------------------------------------------------------------
+ * LAYER 2: The session
+ * ------------------------------------------------------------------------ */
+
+void test_transport_init(void) {
+    mock_t m;
+    transport_t t;
+    t.len = 42;
+    transport_init(&t, mock_read, mock_write, &m);
+    TEST_ASSERT_TRUE(t.read == mock_read);
+    TEST_ASSERT_TRUE(t.write == mock_write);
+    TEST_ASSERT_TRUE(t.ctx == &m);
+    TEST_ASSERT_EQUAL_size_t(0, t.len);
+
+    transport_init(NULL, mock_read, mock_write, &m); // must not crash
+}
+
+void test_read_line(void) {
+    mock_t m;
+    transport_t t;
+    char line[64];
+
+    // CRLF and bare LF both end a line, and neither is returned.
+    mock_start(&m, &t, "220 hello\r\n250 bare lf\n\r\n\n", 0);
+    TEST_ASSERT_EQUAL_INT(9, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("220 hello", line);
+    TEST_ASSERT_EQUAL_INT(11, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250 bare lf", line);
+    TEST_ASSERT_EQUAL_INT(0, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("", line);
+    TEST_ASSERT_EQUAL_INT(0, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("", line);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_line(&t, line, sizeof(line)));
+}
+
+void test_read_line_several_lines_in_one_read(void) {
+    mock_t m;
+    transport_t t;
+    char line[64];
+
+    mock_start(&m, &t, "250-one\r\n250-two\r\n250 three\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(7, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250-one", line);
+    TEST_ASSERT_EQUAL_INT(7, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250-two", line);
+    TEST_ASSERT_EQUAL_INT(9, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250 three", line);
+    // The buffer is refilled only when it does not already hold a line.
+    TEST_ASSERT_EQUAL_INT(1, m.reads);
+}
+
+void test_read_line_a_few_bytes_at_a_time(void) {
+    for (size_t chunk = 1; chunk <= 12; chunk++) {
+        mock_t m;
+        transport_t t;
+        char line[64];
+
+        mock_start(&m, &t, "220 smtp.example.com ESMTP\r\n250 OK\r\n", chunk);
+        TEST_ASSERT_EQUAL_INT(26, read_line(&t, line, sizeof(line)));
+        TEST_ASSERT_EQUAL_STRING("220 smtp.example.com ESMTP", line);
+        TEST_ASSERT_EQUAL_INT(6, read_line(&t, line, sizeof(line)));
+        TEST_ASSERT_EQUAL_STRING("250 OK", line);
+        TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_line(&t, line, sizeof(line)));
+    }
+
+    // A CR and its LF split across two reads are still one line ending.
+    mock_t m;
+    transport_t t;
+    char line[64];
+    mock_start(&m, &t, "250 OK\r\n", 7);
+    TEST_ASSERT_EQUAL_INT(6, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250 OK", line);
+}
+
+void test_read_line_too_long_for_caller(void) {
+    mock_t m;
+    transport_t t;
+    char line[8];
+
+    // "250 OK1" needs 8 bytes with its NUL, "250 OK12" needs 9.
+    mock_start(&m, &t, "250 OK1\r\n250 OK12\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(7, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250 OK1", line);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_line(&t, line, sizeof(line)));
+}
+
+void test_read_line_too_long_for_buffer(void) {
+    // A line that just fits: SMTP_LINE_MAX bytes including its CRLF.
+    char *script = malloc(2 * SMTP_LINE_MAX + 16);
+    TEST_ASSERT_NOT_NULL(script);
+    memset(script, 'a', SMTP_LINE_MAX - 2);
+    strcpy(script + SMTP_LINE_MAX - 2, "\r\n");
+
+    mock_t m;
+    transport_t t;
+    char line[2 * SMTP_LINE_MAX];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_LINE_MAX - 2, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_size_t(SMTP_LINE_MAX - 2, strlen(line));
+
+    // One byte more and the buffer fills up before the line ends.
+    memset(script, 'a', SMTP_LINE_MAX + 5);
+    strcpy(script + SMTP_LINE_MAX + 5, "\r\n");
+    mock_start(&m, &t, script, 100);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_size_t(SMTP_LINE_MAX, t.len);
+
+    free(script);
+}
+
+void test_read_line_errors(void) {
+    mock_t m;
+    transport_t t;
+    char line[64];
+
+    mock_start(&m, &t, "220 OK\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_line(NULL, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_line(&t, NULL, sizeof(line)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_line(&t, line, 0));
+    transport_init(&t, NULL, mock_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_line(&t, line, sizeof(line)));
+
+    // The server hangs up before sending anything, or halfway through a line.
+    mock_start(&m, &t, "", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_line(&t, line, sizeof(line)));
+    mock_start(&m, &t, "220 no line ending", 4);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_line(&t, line, sizeof(line)));
+
+    // The read callback fails, or claims more bytes than it was given room for.
+    mock_start(&m, &t, "220 partial", 0);
+    m.fail_at_end = true;
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, read_line(&t, line, sizeof(line)));
+    transport_init(&t, failing_read, mock_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, read_line(&t, line, sizeof(line)));
+    transport_init(&t, oversized_read, mock_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, read_line(&t, line, sizeof(line)));
+}
+
+void test_read_full_reply_single_line(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    mock_start(&m, &t, "220 smtp.example.com ESMTP ready\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(220, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("220 smtp.example.com ESMTP ready", reply);
+
+    // A reply may be nothing but the code.
+    mock_start(&m, &t, "250\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(250, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250", reply);
+}
+
+void test_read_full_reply_multi_line(void) {
+    const char *script = "250-smtp.example.com\r\n"
+                         "250-PIPELINING\r\n"
+                         "250 SIZE 10240000\r\n"
+                         "221 Bye\r\n";
+
+    // Delivered all at once and a few bytes at a time.
+    for (size_t chunk = 0; chunk <= 8; chunk++) {
+        mock_t m;
+        transport_t t;
+        char reply[256];
+
+        mock_start(&m, &t, script, chunk);
+        TEST_ASSERT_EQUAL_INT(250, read_full_reply(&t, reply, sizeof(reply)));
+        TEST_ASSERT_EQUAL_STRING("250-smtp.example.com\n250-PIPELINING\n250 SIZE 10240000", reply);
+
+        // The reply stops at its last line; the next reply is untouched.
+        TEST_ASSERT_EQUAL_INT(221, read_full_reply(&t, reply, sizeof(reply)));
+        TEST_ASSERT_EQUAL_STRING("221 Bye", reply);
+    }
+}
+
+void test_read_full_reply_malformed(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    // Not a reply at all; the text is kept so it can be reported.
+    mock_start(&m, &t, "hello there\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_SYNTAX, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("hello there", reply);
+
+    // A bad line in the middle of a multi-line reply.
+    mock_start(&m, &t, "250-one\r\nbogus\r\n250 three\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_SYNTAX, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250-one\nbogus", reply);
+
+    // The lines of one reply disagree about the code.
+    mock_start(&m, &t, "250-one\r\n554 two\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_SYNTAX, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250-one\n554 two", reply);
+}
+
+void test_read_full_reply_too_long(void) {
+    mock_t m;
+    transport_t t;
+    char reply[16];
+
+    // "250-first\n250 end" is 17 bytes plus the NUL.
+    const char *script = "250-first\r\n250 end\r\n";
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250-first", reply);
+
+    char exact[18];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(250, read_full_reply(&t, exact, sizeof(exact)));
+    TEST_ASSERT_EQUAL_STRING("250-first\n250 end", exact);
+
+    char short_by_one[17];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_full_reply(&t, short_by_one, sizeof(short_by_one)));
+
+    // A single line that does not fit.
+    char tiny[4];
+    mock_start(&m, &t, "250 OK\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_full_reply(&t, tiny, sizeof(tiny)));
+    TEST_ASSERT_EQUAL_STRING("", tiny);
+
+    // A line longer than the line reader's buffer.
+    char *big = malloc(SMTP_LINE_MAX + 16);
+    TEST_ASSERT_NOT_NULL(big);
+    memcpy(big, "250 ", 4);
+    memset(big + 4, 'x', SMTP_LINE_MAX);
+    strcpy(big + 4 + SMTP_LINE_MAX, "\r\n");
+    char large[4 * SMTP_LINE_MAX];
+    mock_start(&m, &t, big, 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_full_reply(&t, large, sizeof(large)));
+    free(big);
+}
+
+void test_read_full_reply_hang_up(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    mock_start(&m, &t, "", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_full_reply(&t, reply, sizeof(reply)));
+
+    // The server hangs up after a continuation line.
+    mock_start(&m, &t, "250-smtp.example.com\r\n250-PIPE", 3);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250-smtp.example.com", reply);
+
+    mock_start(&m, &t, "250-smtp.example.com\r\n", 0);
+    m.fail_at_end = true;
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, read_full_reply(&t, reply, sizeof(reply)));
+}
+
+void test_read_full_reply_args(void) {
+    mock_t m;
+    transport_t t;
+    char reply[16];
+
+    mock_start(&m, &t, "250 OK\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_full_reply(NULL, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_full_reply(&t, NULL, sizeof(reply)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_full_reply(&t, reply, 0));
+    TEST_ASSERT_EQUAL_INT(0, m.reads);
+}
+
+void test_write_all(void) {
+    const char *data = "MAIL FROM:<me@boisestate.edu>\r\n";
+
+    // Whole writes and short writes both deliver every byte.
+    for (size_t chunk = 0; chunk <= 5; chunk++) {
+        mock_t m;
+        transport_t t;
+        mock_start(&m, &t, "", 0);
+        m.write_chunk = chunk;
+        TEST_ASSERT_EQUAL_INT(0, write_all(&t, data, strlen(data)));
+        TEST_ASSERT_EQUAL_STRING(data, m.sent);
+    }
+
+    mock_t m;
+    transport_t t;
+    mock_start(&m, &t, "", 0);
+    m.write_chunk = 1;
+    TEST_ASSERT_EQUAL_INT(0, write_all(&t, data, strlen(data)));
+    TEST_ASSERT_EQUAL_INT((int)strlen(data), m.writes);
+
+    // Nothing to write means no write call.
+    mock_start(&m, &t, "", 0);
+    TEST_ASSERT_EQUAL_INT(0, write_all(&t, data, 0));
+    TEST_ASSERT_EQUAL_INT(0, m.writes);
+
+    // A write that fails after a short write.
+    mock_start(&m, &t, "", 0);
+    m.write_chunk = 4;
+    m.fail_write_at = 2;
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, write_all(&t, data, strlen(data)));
+    TEST_ASSERT_EQUAL_STRING("MAIL", m.sent);
+
+    transport_init(&t, mock_read, failing_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, write_all(&t, data, strlen(data)));
+    transport_init(&t, mock_read, zero_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, write_all(&t, data, strlen(data)));
+    transport_init(&t, mock_read, oversized_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, write_all(&t, data, strlen(data)));
+
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, write_all(NULL, data, strlen(data)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, write_all(&t, NULL, 3));
+    transport_init(&t, mock_read, NULL, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, write_all(&t, data, strlen(data)));
+}
+
+void test_expect_reply(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    mock_start(&m, &t, "220 ready\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(0, expect_reply(&t, 220, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("220 ready", reply);
+
+    mock_start(&m, &t, "554-no\r\n554 go away\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_UNEXPECTED, expect_reply(&t, 220, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("554-no\n554 go away", reply);
+
+    mock_start(&m, &t, "220 rea", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, expect_reply(&t, 220, reply, sizeof(reply)));
+
+    mock_start(&m, &t, "junk\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_SYNTAX, expect_reply(&t, 220, reply, sizeof(reply)));
+
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, expect_reply(NULL, 220, reply, sizeof(reply)));
+}
+
+void test_send_command(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    mock_start(&m, &t, "250 smtp.example.com\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(0, send_command(&t, "HELO localhost\r\n", 250, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("HELO localhost\r\n", m.sent);
+    TEST_ASSERT_EQUAL_STRING("250 smtp.example.com", reply);
+
+    mock_start(&m, &t, "250 OK\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_UNEXPECTED, send_command(&t, "DATA\r\n", 354, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250 OK", reply);
+
+    mock_start(&m, &t, "", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, send_command(&t, "QUIT\r\n", 221, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("QUIT\r\n", m.sent);
+
+    // When the write fails, no reply is read.
+    mock_start(&m, &t, "250 OK\r\n", 0);
+    m.fail_write_at = 1;
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, send_command(&t, "HELO localhost\r\n", 250, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_INT(0, m.reads);
+
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, send_command(&t, NULL, 250, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, send_command(NULL, "QUIT\r\n", 221, reply, sizeof(reply)));
+}
+
+static void assert_session_ok(const char *script, size_t read_chunk, size_t write_chunk) {
+    mock_t m;
+    transport_t t;
+    char err[256];
+    char transcript[2048];
+
+    mock_start(&m, &t, script, read_chunk);
+    m.write_chunk = write_chunk;
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("", err);
+    build_transcript(transcript, sizeof(transcript), STEPS);
+    TEST_ASSERT_EQUAL_STRING(transcript, m.sent);
+    TEST_ASSERT_EQUAL_size_t(m.len, m.pos); // every reply was consumed
+}
+
+void test_run_smtp_session_happy(void) {
+    char script[2048];
+    build_script(script, sizeof(script), -1, NULL);
+
+    // The exact bytes the client sends, in order.
+    mock_t m;
+    transport_t t;
+    char err[256];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("", err);
+    TEST_ASSERT_EQUAL_STRING("HELO onyx.boisestate.edu\r\n"
+                             "MAIL FROM:<me@boisestate.edu>\r\n"
+                             "RCPT TO:<you@example.com>\r\n"
+                             "DATA\r\n"
+                             "From: me@boisestate.edu\r\n"
+                             "To: you@example.com\r\n"
+                             "Subject: hello\r\n"
+                             "\r\n"
+                             "This is the message body.\r\n"
+                             ".\r\n"
+                             "QUIT\r\n", m.sent);
+
+    // The same session with replies and writes split into small pieces.
+    for (size_t chunk = 1; chunk <= 7; chunk++) {
+        assert_session_ok(script, chunk, 0);
+        assert_session_ok(script, 0, chunk);
+    }
+}
+
+void test_run_smtp_session_multi_line_replies(void) {
+    const char *script = "220-smtp.example.com ESMTP ready\r\n"
+                         "220 no UCE\r\n"
+                         "250-smtp.example.com\r\n"
+                         "250-PIPELINING\r\n"
+                         "250 SIZE 10240000\r\n"
+                         "250 2.1.0 Ok\r\n"
+                         "250 2.1.5 Ok\r\n"
+                         "354 End data with <CR><LF>.<CR><LF>\r\n"
+                         "250-2.0.0 Ok\r\n"
+                         "250 2.0.0 queued as 12345\r\n"
+                         "221 2.0.0 Bye\r\n";
+    assert_session_ok(script, 0, 0);
+    assert_session_ok(script, 3, 0);
+}
+
+void test_run_smtp_session_dot_stuffing(void) {
+    char script[2048];
+    build_script(script, sizeof(script), -1, NULL);
+
+    smtp_message_t msg = good_msg;
+    msg.subject = NULL;
+    msg.body = ".starts with a dot\n.\nlast line";
+
+    mock_t m;
+    transport_t t;
+    char err[256];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &msg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(m.sent,
+                                "DATA\r\n"
+                                "From: me@boisestate.edu\r\n"
+                                "To: you@example.com\r\n"
+                                "Subject: \r\n"
+                                "\r\n"
+                                "..starts with a dot\r\n"
+                                "..\r\n"
+                                "last line\r\n"
+                                ".\r\n"
+                                "QUIT\r\n"));
+}
+
+// Replaces the reply at each step with `reply` and checks that the client
+// reports it and stops without sending anything more.
+static void assert_each_step_rejects(const char *(*reply_for)(int step)) {
+    for (int step = 0; step < STEPS; step++) {
+        const char *reply = reply_for(step);
+        char script[2048];
+        char transcript[2048];
+        char err[512];
+        build_script(script, sizeof(script), step, reply);
+        build_transcript(transcript, sizeof(transcript), step);
+
+        mock_t m;
+        transport_t t;
+        mock_start(&m, &t, script, 0);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(2, run_smtp_session(&t, &good_msg, err, sizeof(err)), step_names[step]);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(transcript, m.sent, step_names[step]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, step_names[step]), err);
+
+        // The message names the code that was required and quotes the reply,
+        // whose lines the client reports without their CRLF.
+        char quoted[128];
+        size_t q = 0;
+        for (const char *p = reply; *p && q < sizeof(quoted) - 1; p++) {
+            if (*p != '\r') quoted[q++] = *p;
+        }
+        quoted[q - 1] = '\0'; // drop the final LF
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, quoted), err);
+        char want[32];
+        snprintf(want, sizeof(want), "expected %.3s", good_replies[step]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, want), err);
+    }
+}
+
+static const char *permanent_failure(int step) {
+    (void)step;
+    return "554 5.7.1 Rejected\r\n";
+}
+
+static const char *transient_failure(int step) {
+    (void)step;
+    return "421 4.3.2 Service not available\r\n";
+}
+
+// A valid reply, but the one that belongs to some other step.
+static const char *code_from_wrong_step(int step) {
+    static const char *wrong[STEPS] = {
+        "250 not a greeting\r\n",
+        "220 not a HELO reply\r\n",
+        "354 not a MAIL reply\r\n",
+        "251 User not local; will forward\r\n",
+        "250 not a DATA reply\r\n",
+        "354 not a queued reply\r\n",
+        "250 not a QUIT reply\r\n",
+    };
+    return wrong[step];
+}
+
+static const char *multi_line_failure(int step) {
+    (void)step;
+    return "550-5.1.1 Mailbox unavailable\r\n550 5.1.1 Try again later\r\n";
+}
+
+void test_run_smtp_session_wrong_codes(void) {
+    assert_each_step_rejects(permanent_failure);
+    assert_each_step_rejects(transient_failure);
+    assert_each_step_rejects(code_from_wrong_step);
+}
+
+void test_run_smtp_session_multi_line_rejection(void) {
+    assert_each_step_rejects(multi_line_failure);
+
+    char script[2048];
+    char err[512];
+    build_script(script, sizeof(script), 3, multi_line_failure(3));
+    mock_t m;
+    transport_t t;
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("RCPT TO: expected 250 but the server replied: "
+                             "550-5.1.1 Mailbox unavailable\n550 5.1.1 Try again later", err);
+}
+
+void test_run_smtp_session_hang_up(void) {
+    for (int step = 0; step < STEPS; step++) {
+        char transcript[2048];
+        build_transcript(transcript, sizeof(transcript), step);
+
+        // The server hangs up instead of replying, and halfway through a reply.
+        for (int partial = 0; partial < 2; partial++) {
+            char script[2048];
+            char err[512];
+            build_script(script, sizeof(script), step, NULL);
+            if (partial) strncat(script, good_replies[step], 5);
+
+            mock_t m;
+            transport_t t;
+            mock_start(&m, &t, script, 2);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(2, run_smtp_session(&t, &good_msg, err, sizeof(err)), step_names[step]);
+            TEST_ASSERT_EQUAL_STRING_MESSAGE(transcript, m.sent, step_names[step]);
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, step_names[step]), err);
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "closed the connection"), err);
+        }
+    }
+}
+
+void test_run_smtp_session_malformed_reply(void) {
+    char script[2048];
+    char err[512];
+    mock_t m;
+    transport_t t;
+
+    build_script(script, sizeof(script), 0, "SSH-2.0-OpenSSH_9.6\r\n");
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("greeting: the server sent a malformed reply: SSH-2.0-OpenSSH_9.6", err);
+    TEST_ASSERT_EQUAL_STRING("", m.sent);
+
+    build_script(script, sizeof(script), 4, "354-go\r\n250 ahead\r\n");
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "DATA: the server sent a malformed reply"));
+}
+
+void test_run_smtp_session_reply_too_long(void) {
+    char *script = malloc(SMTP_LINE_MAX + 16);
+    TEST_ASSERT_NOT_NULL(script);
+    memcpy(script, "220 ", 4);
+    memset(script + 4, 'x', SMTP_LINE_MAX);
+    strcpy(script + 4 + SMTP_LINE_MAX, "\r\n");
+
+    mock_t m;
+    transport_t t;
+    char err[512];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("greeting: the server's reply is too long", err);
+    TEST_ASSERT_EQUAL_STRING("", m.sent);
+    free(script);
+}
+
+void test_run_smtp_session_io_errors(void) {
+    char script[2048];
+    char err[512];
+    mock_t m;
+    transport_t t;
+
+    // A read fails partway through the session.
+    build_script(script, sizeof(script), 2, NULL);
+    mock_start(&m, &t, script, 0);
+    m.fail_at_end = true;
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("MAIL FROM: error reading from or writing to the connection", err);
+
+    // A write fails: the RCPT TO command is the third write.
+    build_script(script, sizeof(script), -1, NULL);
+    mock_start(&m, &t, script, 0);
+    m.fail_write_at = 3;
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("RCPT TO: error reading from or writing to the connection", err);
+    build_transcript(script, sizeof(script), 2);
+    TEST_ASSERT_EQUAL_STRING(script, m.sent);
+}
+
+void test_run_smtp_session_invalid_message(void) {
+    char script[2048];
+    char err[512];
+    build_script(script, sizeof(script), -1, NULL);
+
+    smtp_message_t bad[6];
+    for (int i = 0; i < 6; i++) bad[i] = good_msg;
+    bad[0].helo = NULL;
+    bad[1].from = NULL;
+    bad[2].to = "you@example.com\r\nRCPT TO:<other@example.com>";
+    bad[3].subject = "hi\r\nBcc: other@example.com";
+    bad[4].helo = "onyx\nRSET";
+    bad[5].from = "me@boisestate.edu>\r\nRSET";
+
+    // Nothing is read or written for a message that cannot be sent safely.
+    for (int i = 0; i < 6; i++) {
+        mock_t m;
+        transport_t t;
+        mock_start(&m, &t, script, 0);
+        TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &bad[i], err, sizeof(err)));
+        TEST_ASSERT_NOT_NULL(strstr(err, "invalid message"));
+        TEST_ASSERT_EQUAL_INT(0, m.reads);
+        TEST_ASSERT_EQUAL_INT(0, m.writes);
+    }
+
+    // A missing subject and body are fine.
+    smtp_message_t minimal = good_msg;
+    minimal.subject = NULL;
+    minimal.body = NULL;
+    mock_t m;
+    transport_t t;
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &minimal, err, sizeof(err)));
+}
+
+void test_run_smtp_session_args(void) {
+    char script[2048];
+    char err[512];
+    build_script(script, sizeof(script), -1, NULL);
+    mock_t m;
+    transport_t t;
+    mock_start(&m, &t, script, 0);
+
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(NULL, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("no transport or message", err);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, NULL, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("no transport or message", err);
+
+    // The error buffer is optional.
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(NULL, &good_msg, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &good_msg, err, 0));
+
+    // A long reply is cut to fit the error buffer, which stays terminated.
+    char small[16];
+    build_script(script, sizeof(script), 0, "554 this reply is much longer than sixteen bytes\r\n");
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, small, sizeof(small)));
+    TEST_ASSERT_EQUAL_STRING("greeting: expec", small);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_get_greeting);
@@ -237,5 +1045,32 @@ int main(void) {
     RUN_TEST(test_build_envelope_command);
     RUN_TEST(test_dot_stuff);
     RUN_TEST(test_build_data_payload);
+    RUN_TEST(test_transport_init);
+    RUN_TEST(test_read_line);
+    RUN_TEST(test_read_line_several_lines_in_one_read);
+    RUN_TEST(test_read_line_a_few_bytes_at_a_time);
+    RUN_TEST(test_read_line_too_long_for_caller);
+    RUN_TEST(test_read_line_too_long_for_buffer);
+    RUN_TEST(test_read_line_errors);
+    RUN_TEST(test_read_full_reply_single_line);
+    RUN_TEST(test_read_full_reply_multi_line);
+    RUN_TEST(test_read_full_reply_malformed);
+    RUN_TEST(test_read_full_reply_too_long);
+    RUN_TEST(test_read_full_reply_hang_up);
+    RUN_TEST(test_read_full_reply_args);
+    RUN_TEST(test_write_all);
+    RUN_TEST(test_expect_reply);
+    RUN_TEST(test_send_command);
+    RUN_TEST(test_run_smtp_session_happy);
+    RUN_TEST(test_run_smtp_session_multi_line_replies);
+    RUN_TEST(test_run_smtp_session_dot_stuffing);
+    RUN_TEST(test_run_smtp_session_wrong_codes);
+    RUN_TEST(test_run_smtp_session_multi_line_rejection);
+    RUN_TEST(test_run_smtp_session_hang_up);
+    RUN_TEST(test_run_smtp_session_malformed_reply);
+    RUN_TEST(test_run_smtp_session_reply_too_long);
+    RUN_TEST(test_run_smtp_session_io_errors);
+    RUN_TEST(test_run_smtp_session_invalid_message);
+    RUN_TEST(test_run_smtp_session_args);
     return UNITY_END();
 }

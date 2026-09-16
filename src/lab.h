@@ -17,6 +17,17 @@
  *                               satisfy those callbacks.
  */
 
+/* RFC 5321 4.5.3.1.5 caps a reply line at 512 octets; allow some slack. */
+#define SMTP_LINE_MAX 1024
+
+/* Error values returned by the layer 2 functions. All are negative. */
+#define SMTP_ERR_ARG        -1 /* a required argument was NULL or empty */
+#define SMTP_ERR_IO         -2 /* the read or write callback failed */
+#define SMTP_ERR_CLOSED     -3 /* the server hung up */
+#define SMTP_ERR_TOO_LONG   -4 /* a line or reply did not fit its buffer */
+#define SMTP_ERR_SYNTAX     -5 /* the server sent something that is not a reply */
+#define SMTP_ERR_UNEXPECTED -6 /* a valid reply arrived with the wrong code */
+
 /* ------------------------------------------------------------------------
  * LAYER 1: Pure protocol helpers
  * ------------------------------------------------------------------------ */
@@ -101,6 +112,137 @@ char *dot_stuff(const char *body);
  */
 char *build_data_payload(const char *from, const char *to,
                          const char *subject, const char *body);
+
+/* ------------------------------------------------------------------------
+ * LAYER 2: The session, over a swappable transport
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Reads up to len bytes into buf, like recv(2).
+ * Returns the number of bytes read, 0 when the peer has hung up, or -1.
+ */
+typedef ssize_t (*transport_read_fn)(void *ctx, char *buf, size_t len);
+
+/**
+ * Writes up to len bytes from data, like send(2).
+ * Returns the number of bytes written (possibly fewer than len), or -1.
+ */
+typedef ssize_t (*transport_write_fn)(void *ctx, const char *data, size_t len);
+
+/**
+ * A byte stream plus the buffer the line reader keeps between calls. The
+ * real client points the callbacks at a socket; the tests point them at a
+ * scripted in-memory server.
+ */
+typedef struct {
+    transport_read_fn read;
+    transport_write_fn write;
+    void *ctx;
+    char buf[SMTP_LINE_MAX]; /* bytes received but not yet returned */
+    size_t len;              /* number of valid bytes in buf */
+} transport_t;
+
+/** The message a session sends. */
+typedef struct {
+    const char *helo;    /* host name sent with HELO */
+    const char *from;    /* envelope sender and From header */
+    const char *to;      /* envelope recipient and To header */
+    const char *subject; /* Subject header, NULL means empty */
+    const char *body;    /* message body, NULL means empty */
+} smtp_message_t;
+
+/**
+ * @brief Initializes a transport with an empty read buffer.
+ *
+ * @param t     The transport to initialize.
+ * @param read  The read callback.
+ * @param write The write callback.
+ * @param ctx   Passed unchanged to both callbacks.
+ */
+void transport_init(transport_t *t, transport_read_fn read,
+                    transport_write_fn write, void *ctx);
+
+/**
+ * @brief Reads one line from the transport.
+ *
+ * The buffer is only refilled when it does not already hold a complete
+ * line, so a line split across reads and several lines arriving in one read
+ * are both handled. The line ending (LF or CRLF) is removed.
+ *
+ * @param t    The transport.
+ * @param line Receives the NUL terminated line.
+ * @param size The size of line.
+ * @return The length of the line, or SMTP_ERR_ARG, SMTP_ERR_IO,
+ *         SMTP_ERR_CLOSED or SMTP_ERR_TOO_LONG.
+ */
+int read_line(transport_t *t, char *line, size_t size);
+
+/**
+ * @brief Reads a complete reply, following continuation lines.
+ *
+ * The lines are stored in reply separated by '\n'. When a line is not a
+ * valid reply line it is still stored, so the caller can report it.
+ *
+ * @param t     The transport.
+ * @param reply Receives the reply text.
+ * @param size  The size of reply.
+ * @return The reply code, or SMTP_ERR_ARG, SMTP_ERR_IO, SMTP_ERR_CLOSED,
+ *         SMTP_ERR_TOO_LONG or SMTP_ERR_SYNTAX (also used when the lines of
+ *         one reply carry different codes).
+ */
+int read_full_reply(transport_t *t, char *reply, size_t size);
+
+/**
+ * @brief Writes all len bytes, retrying after short writes.
+ *
+ * @param t    The transport.
+ * @param data The bytes to write.
+ * @param len  The number of bytes to write.
+ * @return 0 on success, SMTP_ERR_ARG or SMTP_ERR_IO.
+ */
+int write_all(transport_t *t, const char *data, size_t len);
+
+/**
+ * @brief Reads a reply and checks its code.
+ *
+ * @param t        The transport.
+ * @param expected The code the protocol requires at this point.
+ * @param reply    Receives the reply text.
+ * @param size     The size of reply.
+ * @return 0 if the reply carried the expected code, SMTP_ERR_UNEXPECTED if
+ *         it carried another one (the text is in reply), or any error from
+ *         read_full_reply.
+ */
+int expect_reply(transport_t *t, int expected, char *reply, size_t size);
+
+/**
+ * @brief Sends one command and checks the code of the reply.
+ *
+ * @param t        The transport.
+ * @param cmd      The complete command, including its CRLF.
+ * @param expected The code the protocol requires in reply.
+ * @param reply    Receives the reply text.
+ * @param size     The size of reply.
+ * @return The same values as expect_reply, or SMTP_ERR_ARG / SMTP_ERR_IO
+ *         if the command could not be written.
+ */
+int send_command(transport_t *t, const char *cmd, int expected,
+                 char *reply, size_t size);
+
+/**
+ * @brief Runs a whole SMTP session: greeting, HELO, MAIL FROM, RCPT TO,
+ * DATA, the message and QUIT, requiring 220, 250, 250, 250, 354, 250, 221.
+ *
+ * The session stops at the first failure without sending anything else.
+ *
+ * @param t        The transport, already connected.
+ * @param msg      The message to send.
+ * @param err      Receives a description of the failure, may be NULL.
+ * @param err_size The size of err.
+ * @return 0 when the server queued the message, 2 otherwise.
+ */
+int run_smtp_session(transport_t *t, const smtp_message_t *msg,
+                     char *err, size_t err_size);
 
 /** * @brief Returns a greeting message.
  *

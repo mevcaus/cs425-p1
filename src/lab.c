@@ -1,8 +1,18 @@
 #define _POSIX_C_SOURCE 200809L
 #include "lab.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+__attribute__((format(printf, 3, 4)))
+static void set_error(char *err, size_t err_size, const char *fmt, ...) {
+    if (!err || err_size == 0) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(err, err_size, fmt, ap);
+    va_end(ap);
+}
 
 /**
  * LAYER 1: Pure Protocol Helpers
@@ -153,6 +163,178 @@ char *build_data_payload(const char *from, const char *to, const char *subject, 
     snprintf(res, size, PAYLOAD_FMT, from, to, subject, stuffed, eol);
     free(stuffed);
     return res;
+}
+
+/**
+ * LAYER 2: The Session
+ */
+
+void transport_init(transport_t *t, transport_read_fn read, transport_write_fn write, void *ctx) {
+    if (!t) return;
+    t->read = read;
+    t->write = write;
+    t->ctx = ctx;
+    t->len = 0;
+}
+
+int read_line(transport_t *t, char *line, size_t size) {
+    if (!t || !t->read || !line || size == 0) return SMTP_ERR_ARG;
+
+    while (1) {
+        // Hand out a line if the buffer already holds a complete one.
+        char *nl = memchr(t->buf, '\n', t->len);
+        if (nl) {
+            size_t consumed = (size_t)(nl - t->buf) + 1;
+            size_t n = consumed - 1;
+            if (n > 0 && t->buf[n - 1] == '\r') n--;
+            if (n >= size) return SMTP_ERR_TOO_LONG;
+
+            memcpy(line, t->buf, n);
+            line[n] = '\0';
+            t->len -= consumed;
+            memmove(t->buf, t->buf + consumed, t->len);
+            return (int)n;
+        }
+
+        // Otherwise refill it, unless a whole buffer holds no line ending.
+        size_t room = sizeof(t->buf) - t->len;
+        if (room == 0) return SMTP_ERR_TOO_LONG;
+
+        ssize_t got = t->read(t->ctx, t->buf + t->len, room);
+        if (got == 0) return SMTP_ERR_CLOSED;
+        if (got < 0 || (size_t)got > room) return SMTP_ERR_IO;
+        t->len += (size_t)got;
+    }
+}
+
+int read_full_reply(transport_t *t, char *reply, size_t size) {
+    if (!t || !reply || size == 0) return SMTP_ERR_ARG;
+
+    char line[SMTP_LINE_MAX];
+    size_t used = 0;
+    int first_code = -1;
+    reply[0] = '\0';
+
+    while (1) {
+        int n = read_line(t, line, sizeof(line));
+        if (n < 0) return n;
+
+        // Keep every line, even a bad one, so the caller can report it.
+        size_t sep = used > 0 ? 1 : 0;
+        if (used + sep + (size_t)n >= size) return SMTP_ERR_TOO_LONG;
+        if (sep) reply[used++] = '\n';
+        memcpy(reply + used, line, (size_t)n + 1);
+        used += (size_t)n;
+
+        // Every line of a multi-line reply must carry the same code.
+        int code = parse_reply_code(line);
+        if (code < 0 || (first_code >= 0 && code != first_code)) {
+            return SMTP_ERR_SYNTAX;
+        }
+        first_code = code;
+
+        if (is_final_reply_line(line)) return code;
+    }
+}
+
+int write_all(transport_t *t, const char *data, size_t len) {
+    if (!t || !t->write || !data) return SMTP_ERR_ARG;
+
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = t->write(t->ctx, data + sent, len - sent);
+        if (n <= 0 || (size_t)n > len - sent) return SMTP_ERR_IO;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+int expect_reply(transport_t *t, int expected, char *reply, size_t size) {
+    int code = read_full_reply(t, reply, size);
+    if (code < 0) return code;
+    return code == expected ? 0 : SMTP_ERR_UNEXPECTED;
+}
+
+int send_command(transport_t *t, const char *cmd, int expected, char *reply, size_t size) {
+    if (!cmd) return SMTP_ERR_ARG;
+
+    int rc = write_all(t, cmd, strlen(cmd));
+    if (rc < 0) return rc;
+    return expect_reply(t, expected, reply, size);
+}
+
+// Turns a failed step into a message that says what the server sent.
+static void describe_failure(char *err, size_t err_size, const char *step,
+                             int expected, int rc, const char *reply) {
+    switch (rc) {
+        case SMTP_ERR_UNEXPECTED:
+            set_error(err, err_size, "%s: expected %d but the server replied: %s",
+                      step, expected, reply);
+            break;
+        case SMTP_ERR_SYNTAX:
+            set_error(err, err_size, "%s: the server sent a malformed reply: %s", step, reply);
+            break;
+        case SMTP_ERR_CLOSED:
+            set_error(err, err_size, "%s: the server closed the connection", step);
+            break;
+        case SMTP_ERR_TOO_LONG:
+            set_error(err, err_size, "%s: the server's reply is too long", step);
+            break;
+        default:
+            set_error(err, err_size, "%s: error reading from or writing to the connection", step);
+            break;
+    }
+}
+
+int run_smtp_session(transport_t *t, const smtp_message_t *msg, char *err, size_t err_size) {
+    set_error(err, err_size, "%s", "");
+    if (!t || !msg) {
+        set_error(err, err_size, "no transport or message");
+        return 2;
+    }
+
+    enum { STEPS = 7 };
+    const char *names[STEPS] = {
+        "greeting", "HELO", "MAIL FROM", "RCPT TO", "DATA", "end of data", "QUIT"
+    };
+    const int expected[STEPS] = { 220, 250, 250, 250, 354, 250, 221 };
+
+    // Build every command up front so a bad message sends nothing at all.
+    char *cmds[STEPS] = {
+        NULL, // the greeting is only read
+        msg->helo ? build_command("HELO", msg->helo) : NULL,
+        build_envelope_command("MAIL FROM", msg->from),
+        build_envelope_command("RCPT TO", msg->to),
+        build_command("DATA", NULL),
+        build_data_payload(msg->from, msg->to, msg->subject, msg->body),
+        build_command("QUIT", NULL),
+    };
+
+    int result = 0;
+    for (int i = 1; i < STEPS; i++) {
+        if (!cmds[i]) {
+            set_error(err, err_size, "invalid message: a value is missing, or an address, "
+                                     "subject or host name contains a CR or LF");
+            result = 2;
+            break;
+        }
+    }
+
+    char reply[4 * SMTP_LINE_MAX];
+    reply[0] = '\0';
+    for (int i = 0; i < STEPS && result == 0; i++) {
+        int rc = cmds[i] ? send_command(t, cmds[i], expected[i], reply, sizeof(reply))
+                         : expect_reply(t, expected[i], reply, sizeof(reply));
+        if (rc != 0) {
+            describe_failure(err, err_size, names[i], expected[i], rc, reply);
+            result = 2;
+        }
+    }
+
+    for (int i = 0; i < STEPS; i++) {
+        free(cmds[i]);
+    }
+    return result;
 }
 
 
