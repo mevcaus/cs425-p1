@@ -1,9 +1,20 @@
 #define _POSIX_C_SOURCE 200809L
 #include "lab.h"
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+// send() raises SIGPIPE when the peer has gone away; ask for EPIPE instead.
+#ifdef MSG_NOSIGNAL
+#define SEND_FLAGS MSG_NOSIGNAL
+#else
+#define SEND_FLAGS 0
+#endif
 
 __attribute__((format(printf, 3, 4)))
 static void set_error(char *err, size_t err_size, const char *fmt, ...) {
@@ -337,6 +348,58 @@ int run_smtp_session(transport_t *t, const smtp_message_t *msg, char *err, size_
     return result;
 }
 
+/**
+ * LAYER 3: The Socket Transport
+ */
+
+int socket_connect(const char *host, const char *port, char *err, size_t err_size) {
+    if (!host || !port) {
+        set_error(err, err_size, "no server or port given");
+        return -1;
+    }
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC; // IPv4 or IPv6
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = NULL;
+    int rc = getaddrinfo(host, port, &hints, &res);
+    if (rc != 0) {
+        set_error(err, err_size, "cannot resolve %s port %s: %s", host, port, gai_strerror(rc));
+        return -1;
+    }
+
+    // Try each address in turn until one accepts the connection.
+    int fd = -1;
+    int saved_errno = 0;
+    for (struct addrinfo *p = res; p; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) { // GCOVR_EXCL_START
+            saved_errno = errno;
+            continue;
+        } // GCOVR_EXCL_STOP
+        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+
+        saved_errno = errno;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+
+    if (fd < 0) {
+        set_error(err, err_size, "cannot connect to %s port %s: %s", host, port, strerror(saved_errno));
+    }
+    return fd;
+}
+
+ssize_t socket_read(void *ctx, char *buf, size_t len) {
+    return recv(*(int *)ctx, buf, len, 0);
+}
+
+ssize_t socket_write(void *ctx, const char *data, size_t len) {
+    return send(*(int *)ctx, data, len, SEND_FLAGS);
+}
 
 char *get_greeting(const char *restrict name)
 {

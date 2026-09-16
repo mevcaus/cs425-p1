@@ -2,6 +2,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "harness/unity.h"
 #include "../src/lab.h"
 
@@ -1035,7 +1040,150 @@ void test_run_smtp_session_args(void) {
     TEST_ASSERT_EQUAL_STRING("greeting: expec", small);
 }
 
+/* ------------------------------------------------------------------------
+ * LAYER 3: The socket transport
+ * ------------------------------------------------------------------------ */
+
+// Opens a TCP socket on an unused loopback port and writes the port number
+// into port. The socket listens only when asked to.
+static int loopback_socket(char *port, size_t size, bool listening) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE(s >= 0);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    TEST_ASSERT_EQUAL_INT(0, bind(s, (struct sockaddr *)&addr, sizeof(addr)));
+    if (listening) TEST_ASSERT_EQUAL_INT(0, listen(s, 1));
+
+    socklen_t len = sizeof(addr);
+    TEST_ASSERT_EQUAL_INT(0, getsockname(s, (struct sockaddr *)&addr, &len));
+    snprintf(port, size, "%u", (unsigned)ntohs(addr.sin_port));
+    return s;
+}
+
+void test_socket_read_write(void) {
+    char port[16];
+    char err[256];
+    int listener = loopback_socket(port, sizeof(port), true);
+
+    int client = socket_connect("127.0.0.1", port, err, sizeof(err));
+    TEST_ASSERT_TRUE_MESSAGE(client >= 0, err);
+    int server = accept(listener, NULL, NULL);
+    TEST_ASSERT_TRUE(server >= 0);
+
+    char buf[64];
+    TEST_ASSERT_EQUAL_INT(6, (int)socket_write(&client, "HELO\r\n", 6));
+    TEST_ASSERT_EQUAL_INT(6, (int)socket_read(&server, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_MEMORY("HELO\r\n", buf, 6);
+
+    TEST_ASSERT_EQUAL_INT(8, (int)socket_write(&server, "250 OK\r\n", 8));
+    TEST_ASSERT_EQUAL_INT(8, (int)socket_read(&client, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_MEMORY("250 OK\r\n", buf, 8);
+
+    // A hang-up reads as zero bytes.
+    close(server);
+    TEST_ASSERT_EQUAL_INT(0, (int)socket_read(&client, buf, sizeof(buf)));
+
+    close(client);
+    close(listener);
+
+    // Both wrappers pass failures through.
+    int bad = -1;
+    TEST_ASSERT_EQUAL_INT(-1, (int)socket_read(&bad, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_INT(-1, (int)socket_write(&bad, "x", 1));
+}
+
+void test_socket_session(void) {
+    char port[16];
+    char err[256];
+    int listener = loopback_socket(port, sizeof(port), true);
+
+    int client = socket_connect("127.0.0.1", port, err, sizeof(err));
+    TEST_ASSERT_TRUE_MESSAGE(client >= 0, err);
+    int server = accept(listener, NULL, NULL);
+    TEST_ASSERT_TRUE(server >= 0);
+
+    // The server queues all of its replies up front; the client reads them
+    // one at a time, just as it would from a real server.
+    char script[2048];
+    build_script(script, sizeof(script), -1, NULL);
+    TEST_ASSERT_EQUAL_INT((int)strlen(script), (int)write(server, script, strlen(script)));
+
+    transport_t t;
+    transport_init(&t, socket_read, socket_write, &client);
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    close(client);
+
+    // Everything the client sent, read until it hung up.
+    char sent[2048];
+    size_t got = 0;
+    ssize_t n;
+    while ((n = read(server, sent + got, sizeof(sent) - 1 - got)) > 0) {
+        got += (size_t)n;
+    }
+    sent[got] = '\0';
+    char transcript[2048];
+    build_transcript(transcript, sizeof(transcript), STEPS);
+    TEST_ASSERT_EQUAL_STRING(transcript, sent);
+
+    close(server);
+    close(listener);
+}
+
+void test_socket_session_server_hangs_up(void) {
+    char port[16];
+    char err[256];
+    int listener = loopback_socket(port, sizeof(port), true);
+
+    int client = socket_connect("127.0.0.1", port, err, sizeof(err));
+    TEST_ASSERT_TRUE_MESSAGE(client >= 0, err);
+    int server = accept(listener, NULL, NULL);
+    TEST_ASSERT_TRUE(server >= 0);
+
+    // The server greets, then goes away before the reply to HELO.
+    size_t greeting_len = strlen(good_replies[0]);
+    TEST_ASSERT_EQUAL_INT((int)greeting_len, (int)write(server, good_replies[0], greeting_len));
+    close(server);
+
+    transport_t t;
+    transport_init(&t, socket_read, socket_write, &client);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "HELO: "), err);
+
+    close(client);
+    close(listener);
+}
+
+void test_socket_connect_refused(void) {
+    // Bound but not listening, so a connection attempt is refused.
+    char port[16];
+    char err[256];
+    int s = loopback_socket(port, sizeof(port), false);
+
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect("127.0.0.1", port, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "cannot connect to 127.0.0.1 port "), err);
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect("127.0.0.1", port, NULL, 0));
+    close(s);
+}
+
+void test_socket_connect_bad_address(void) {
+    char err[256];
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect("127.0.0.1", "no-such-service", err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "cannot resolve 127.0.0.1 port no-such-service"), err);
+
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect(NULL, "25", err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("no server or port given", err);
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect("127.0.0.1", NULL, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("no server or port given", err);
+}
+
 int main(void) {
+    // A write to a socket the peer closed must fail, not kill the tests.
+    signal(SIGPIPE, SIG_IGN);
+
     UNITY_BEGIN();
     RUN_TEST(test_get_greeting);
     RUN_TEST(test_has_crlf);
@@ -1072,5 +1220,10 @@ int main(void) {
     RUN_TEST(test_run_smtp_session_io_errors);
     RUN_TEST(test_run_smtp_session_invalid_message);
     RUN_TEST(test_run_smtp_session_args);
+    RUN_TEST(test_socket_read_write);
+    RUN_TEST(test_socket_session);
+    RUN_TEST(test_socket_session_server_hangs_up);
+    RUN_TEST(test_socket_connect_refused);
+    RUN_TEST(test_socket_connect_bad_address);
     return UNITY_END();
 }

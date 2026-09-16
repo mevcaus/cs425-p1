@@ -244,6 +244,33 @@ int send_command(transport_t *t, const char *cmd, int expected,
 int run_smtp_session(transport_t *t, const smtp_message_t *msg,
                      char *err, size_t err_size);
 
+/* ------------------------------------------------------------------------
+ * LAYER 3: The socket transport
+ * ------------------------------------------------------------------------ */
+
+/**
+ * @brief Resolves host with getaddrinfo and connects to the first address
+ * that accepts a TCP connection.
+ *
+ * @param host     Host name or address of the server.
+ * @param port     Port number or service name.
+ * @param err      Receives a description of the failure, may be NULL.
+ * @param err_size The size of err.
+ * @return A connected socket the caller must close, or -1.
+ */
+int socket_connect(const char *host, const char *port,
+                   char *err, size_t err_size);
+
+/**
+ * @brief transport_read_fn over recv(2). ctx points at an int socket.
+ */
+ssize_t socket_read(void *ctx, char *buf, size_t len);
+
+/**
+ * @brief transport_write_fn over send(2). ctx points at an int socket.
+ */
+ssize_t socket_write(void *ctx, const char *data, size_t len);
+
 /** * @brief Returns a greeting message.
  *
  * This function returns a string that contains a greeting message.
