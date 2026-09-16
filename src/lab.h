@@ -271,13 +271,4 @@ ssize_t socket_read(void *ctx, char *buf, size_t len);
  */
 ssize_t socket_write(void *ctx, const char *data, size_t len);
 
-/** * @brief Returns a greeting message.
- *
- * This function returns a string that contains a greeting message.
- * The string is allocated with malloc and should be freed by the caller.
- * @param name The name to include in the greeting.
- * @return A greeting string.
- */
-char* get_greeting(const char* restrict name);
-
 #endif // LAB_H

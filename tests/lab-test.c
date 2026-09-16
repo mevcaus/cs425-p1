@@ -152,22 +152,6 @@ static void build_transcript(char *out, size_t size, int step) {
     }
 }
 
-void test_get_greeting(void) {
-  char *greeting = get_greeting("Alice");
-  TEST_ASSERT_NOT_NULL(greeting);
-  TEST_ASSERT_EQUAL_STRING("Hello, Alice!", greeting);
-  free(greeting); // Free the allocated memory for the greeting
-
-  greeting = get_greeting(NULL);
-  TEST_ASSERT_NULL(greeting);
-
-  greeting = get_greeting("");
-  TEST_ASSERT_NOT_NULL(greeting);
-  TEST_ASSERT_EQUAL_STRING("Hello, !", greeting);
-  free(greeting);
-}
-
-
 /* ------------------------------------------------------------------------
  * LAYER 1: Pure protocol helpers
  * ------------------------------------------------------------------------ */
@@ -1185,7 +1169,6 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
 
     UNITY_BEGIN();
-    RUN_TEST(test_get_greeting);
     RUN_TEST(test_has_crlf);
     RUN_TEST(test_parse_reply_code);
     RUN_TEST(test_is_final_reply_line);
