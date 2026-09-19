@@ -1,8 +1,8 @@
 # Submission Report
 
-- Submission generated at 08/27/2026 at 01:52:04
+- Submission generated at 09/19/2026 at 05:47:22
 
-- Machine info: Linux runnervm76f27 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+- Machine info: Linux runnervmlun5p 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
 
 ## Note to Students
 
@@ -17,28 +17,103 @@ Post any questions on the class discussion board for help.
 
 ## README
 
-# Project X
+# cs425-p1 - Simple Mail Client
 
-- Name: John Doe
-- Email: johndoe@u.boisestate.edu
-- Class: CS123-001
+- Name: Mevludin Causevic
+- Email: mevludincausevic@boisestate.edu
+- Class: CS425
 
 ## Known Bugs or Issues
 
-TODO: Are there any known issues?
+None known. Some deliberate limits:
+
+- Only plain SMTP is spoken: `HELO`, no ESMTP extensions, no TLS and no
+  authentication, as the assignment requires.
+- A reply line longer than `SMTP_LINE_MAX` (1024 bytes, twice the RFC 5321
+  limit) or a whole reply longer than 4096 bytes is reported as an error
+  instead of being truncated.
+- Only the codes the assignment lists are accepted (220, 250, 250, 250, 354,
+  250, 221), so a `251 User not local; will forward` reply to `RCPT TO` is
+  treated as a failure.
 
 ## Experience
 
-TODO: Describe your experience with the project (struggles, breakthroughs, etc.).
+I learned how to implement an application layer protocol (SMTP) from scratch
+by writing an SMTP client in C. Handling the CRLF line endings, dot-stuffing
+correctly, and parsing continuations were some of the key lessons learned.
 
-## Analysis
+## Usage
 
-TODO: Provide your analysis of the results. If the assignment does not require
-analysis, you can remove this section.
+```bash
+make all
+echo "This is the message body." | \
+  ./build/release/myapp -f me@boisestate.edu -t you@example.com \
+    -s "hello" -H onyx.boisestate.edu -p 2525 <server>
+```
 
-Here is an example of how to include a plot in your README:
+The exit status is 0 when the server queues the message, 1 when the command
+line is wrong, and 2 when the connection or the SMTP session fails. Every
+failure prints the step that failed and the reply the server actually sent,
+for example:
 
-![Example Image](scripts/example_plot.png)
+```text
+myapp: RCPT TO: expected 250 but the server replied: 550 5.1.1 <nobody@example.com>: Recipient address rejected
+```
+
+## Design
+
+You cannot unit test against a live mail server, so `src/lab.h` splits the
+client into three layers, and only the bottom one touches a socket.
+
+1. **Pure protocol helpers.** Functions that take strings and return strings
+   or codes, with no I/O: `parse_reply_code`, `is_final_reply_line`,
+   `build_command`, `build_envelope_command`, `dot_stuff`,
+   `build_data_payload` and `has_crlf`. This is where the details that are
+   easy to get wrong live: every line goes out with CRLF (a body piped in by
+   `echo` has bare LFs, which are converted), every body line that starts
+   with a period gets a second one (RFC 5321 section 4.5.2), the message
+   always ends with `CRLF.CRLF`, and any value containing a CR or LF is
+   refused so it cannot inject a command or a header.
+
+2. **The session, over a swappable transport.** `transport_t` holds a
+   `read` and a `write` callback (with the same meaning as `recv` and
+   `send`), a context pointer, and the line reader's buffer. `read_line`
+   refills that buffer only when it does not already hold a complete line,
+   so a reply that arrives a few bytes at a time and several replies that
+   arrive in one read are handled the same way. `read_full_reply` follows
+   `250-` continuation lines to the final `250 ` line. `write_all` retries
+   short writes. `expect_reply` and `send_command` check one step's code,
+   and `run_smtp_session` runs the whole sequence, stopping at the first
+   failure without sending anything more. Nothing in this layer calls
+   `recv` or `send`.
+
+3. **The socket transport.** `socket_connect` resolves the server with
+   `getaddrinfo` and tries each address, while `socket_read` and
+   `socket_write` are one-line wrappers over `recv` and `send` that match
+   the two callbacks.
+
+The payoff is layer 2. `main.c` plugs a socket into it, while the unit tests
+plug in a scripted in-memory server: a string of replies, handed out whole or
+a few bytes at a time, plus a buffer that records everything the client sent.
+That makes every error path easy to drive with no network at all. A wrong
+status code is the good script with one reply changed, and a server that
+hangs up is the script cut short. The tests check the exact bytes the client
+sent and that it stopped at the right step. Layer 3 is tested over loopback
+sockets the tests open themselves, so `make check` needs no outside network
+either.
+
+## Testing
+
+```bash
+make clean && make all
+make check       # Unity tests
+make report      # coverage, 100% of lines and branches in src/lab.c
+make leak        # ASan on the no-argument path
+make leak-test   # ASan on the whole test suite
+```
+
+The only coverage exclusions are the failure branches of `malloc`,
+`snprintf` and `socket`, which cannot be made to fail from a test.
 
 ---
 
@@ -48,42 +123,42 @@ Here is an example of how to include a plot in your README:
 This section was generated by running `make all` in the project root directory.
 
 ```bash
-make[1]: Entering directory '/home/runner/work/makefile-project-starter/makefile-project-starter'
+make[1]: Entering directory '/home/runner/work/cs425-p1/cs425-p1'
 mkdir -p build/debug
 cc -g -O0 -DDEBUG -fno-omit-frame-pointer -fsanitize=address -c src/main.c -o build/debug/main.c.o
 mkdir -p build/debug
 cc -g -O0 -DDEBUG -fno-omit-frame-pointer -fsanitize=address -c src/lab.c -o build/debug/lab.c.o
 cc -g -O0 -DDEBUG -fno-omit-frame-pointer -fsanitize=address build/debug/main.c.o build/debug/lab.c.o -o build/debug/myapp_d -fsanitize=address
-make[1]: Leaving directory '/home/runner/work/makefile-project-starter/makefile-project-starter'
-make[1]: Entering directory '/home/runner/work/makefile-project-starter/makefile-project-starter'
+make[1]: Leaving directory '/home/runner/work/cs425-p1/cs425-p1'
+make[1]: Entering directory '/home/runner/work/cs425-p1/cs425-p1'
 mkdir -p build/release
 cc -Wall -Wextra -O2 -fPIE -MMD -MP -Wformat -Wformat=2 -Wconversion -Wsign-conversion -Wimplicit-fallthrough -fstack-protector-strong -Werror=format-security -Werror=implicit -Werror=incompatible-pointer-types -Werror=int-conversion -c src/main.c -o build/release/main.c.o
 mkdir -p build/release
 cc -Wall -Wextra -O2 -fPIE -MMD -MP -Wformat -Wformat=2 -Wconversion -Wsign-conversion -Wimplicit-fallthrough -fstack-protector-strong -Werror=format-security -Werror=implicit -Werror=incompatible-pointer-types -Werror=int-conversion -c src/lab.c -o build/release/lab.c.o
 cc -Wall -Wextra -O2 -fPIE -MMD -MP -Wformat -Wformat=2 -Wconversion -Wsign-conversion -Wimplicit-fallthrough -fstack-protector-strong -Werror=format-security -Werror=implicit -Werror=incompatible-pointer-types -Werror=int-conversion build/release/main.c.o build/release/lab.c.o -o build/release/myapp 
-make[1]: Leaving directory '/home/runner/work/makefile-project-starter/makefile-project-starter'
-make[1]: Entering directory '/home/runner/work/makefile-project-starter/makefile-project-starter'
+make[1]: Leaving directory '/home/runner/work/cs425-p1/cs425-p1'
+make[1]: Entering directory '/home/runner/work/cs425-p1/cs425-p1'
 mkdir -p build/tests
 cc -g -O0 -DTEST -fprofile-arcs -ftest-coverage -c src/main.c -o build/tests/main.c.o
 mkdir -p build/tests
 cc -g -O0 -DTEST -fprofile-arcs -ftest-coverage -c src/lab.c -o build/tests/lab.c.o
-mkdir -p build/tests/harness/
-cc -g -O0 -DTEST -fprofile-arcs -ftest-coverage -c tests/harness/unity.c -o build/tests/harness/unity.c.o
 mkdir -p build/tests/
 cc -g -O0 -DTEST -fprofile-arcs -ftest-coverage -c tests/lab-test.c -o build/tests/lab-test.c.o
-cc -g -O0 -DTEST -fprofile-arcs -ftest-coverage build/tests/main.c.o build/tests/lab.c.o build/tests/harness/unity.c.o build/tests/lab-test.c.o -o build/tests/myapp_t -fprofile-arcs -ftest-coverage
-make[1]: Leaving directory '/home/runner/work/makefile-project-starter/makefile-project-starter'
-make[1]: Entering directory '/home/runner/work/makefile-project-starter/makefile-project-starter'
+mkdir -p build/tests/harness/
+cc -g -O0 -DTEST -fprofile-arcs -ftest-coverage -c tests/harness/unity.c -o build/tests/harness/unity.c.o
+cc -g -O0 -DTEST -fprofile-arcs -ftest-coverage build/tests/main.c.o build/tests/lab.c.o build/tests/lab-test.c.o build/tests/harness/unity.c.o -o build/tests/myapp_t -fprofile-arcs -ftest-coverage
+make[1]: Leaving directory '/home/runner/work/cs425-p1/cs425-p1'
+make[1]: Entering directory '/home/runner/work/cs425-p1/cs425-p1'
 mkdir -p build/debug-test
 cc -g -O0 -DDEBUG -DTEST -fno-omit-frame-pointer -fsanitize=address -c src/main.c -o build/debug-test/main.c.o
 mkdir -p build/debug-test
 cc -g -O0 -DDEBUG -DTEST -fno-omit-frame-pointer -fsanitize=address -c src/lab.c -o build/debug-test/lab.c.o
-mkdir -p build/debug-test/harness/
-cc -g -O0 -DDEBUG -DTEST -fno-omit-frame-pointer -fsanitize=address -c tests/harness/unity.c -o build/debug-test/harness/unity.c.o
 mkdir -p build/debug-test/
 cc -g -O0 -DDEBUG -DTEST -fno-omit-frame-pointer -fsanitize=address -c tests/lab-test.c -o build/debug-test/lab-test.c.o
-cc -g -O0 -DDEBUG -DTEST -fno-omit-frame-pointer -fsanitize=address build/debug-test/main.c.o build/debug-test/lab.c.o build/debug-test/harness/unity.c.o build/debug-test/lab-test.c.o -o build/debug-test/myapp_td -fsanitize=address
-make[1]: Leaving directory '/home/runner/work/makefile-project-starter/makefile-project-starter'
+mkdir -p build/debug-test/harness/
+cc -g -O0 -DDEBUG -DTEST -fno-omit-frame-pointer -fsanitize=address -c tests/harness/unity.c -o build/debug-test/harness/unity.c.o
+cc -g -O0 -DDEBUG -DTEST -fno-omit-frame-pointer -fsanitize=address build/debug-test/main.c.o build/debug-test/lab.c.o build/debug-test/lab-test.c.o build/debug-test/harness/unity.c.o -o build/debug-test/myapp_td -fsanitize=address
+make[1]: Leaving directory '/home/runner/work/cs425-p1/cs425-p1'
 Builds completed. You can run the application with: ./build/release/myapp
 You can run the debug build with: ./build/debug/myapp_d
 You can run the test build with: ./build/tests/myapp_t
@@ -97,20 +172,92 @@ You can run the debug-test build with: ./build/debug-test/myapp_td
 This section was generated by running `make report` in the project root directory.
 
 ```bash
-Setting up tests...
-Tearing down tests...
-tests/lab-test.c:32:test_get_greeting:PASS
+tests/lab-test.c:1172:test_has_crlf:PASS
+tests/lab-test.c:1173:test_parse_reply_code:PASS
+tests/lab-test.c:1174:test_is_final_reply_line:PASS
+tests/lab-test.c:1175:test_build_command:PASS
+tests/lab-test.c:1176:test_build_envelope_command:PASS
+tests/lab-test.c:1177:test_dot_stuff:PASS
+tests/lab-test.c:1178:test_build_data_payload:PASS
+tests/lab-test.c:1179:test_transport_init:PASS
+tests/lab-test.c:1180:test_read_line:PASS
+tests/lab-test.c:1181:test_read_line_several_lines_in_one_read:PASS
+tests/lab-test.c:1182:test_read_line_a_few_bytes_at_a_time:PASS
+tests/lab-test.c:1183:test_read_line_too_long_for_caller:PASS
+tests/lab-test.c:1184:test_read_line_too_long_for_buffer:PASS
+tests/lab-test.c:1185:test_read_line_errors:PASS
+tests/lab-test.c:1186:test_read_full_reply_single_line:PASS
+tests/lab-test.c:1187:test_read_full_reply_multi_line:PASS
+tests/lab-test.c:1188:test_read_full_reply_malformed:PASS
+tests/lab-test.c:1189:test_read_full_reply_too_long:PASS
+tests/lab-test.c:1190:test_read_full_reply_hang_up:PASS
+tests/lab-test.c:1191:test_read_full_reply_args:PASS
+tests/lab-test.c:1192:test_write_all:PASS
+tests/lab-test.c:1193:test_expect_reply:PASS
+tests/lab-test.c:1194:test_send_command:PASS
+tests/lab-test.c:1195:test_run_smtp_session_happy:PASS
+tests/lab-test.c:1196:test_run_smtp_session_multi_line_replies:PASS
+tests/lab-test.c:1197:test_run_smtp_session_dot_stuffing:PASS
+tests/lab-test.c:1198:test_run_smtp_session_wrong_codes:PASS
+tests/lab-test.c:1199:test_run_smtp_session_multi_line_rejection:PASS
+tests/lab-test.c:1200:test_run_smtp_session_hang_up:PASS
+tests/lab-test.c:1201:test_run_smtp_session_malformed_reply:PASS
+tests/lab-test.c:1202:test_run_smtp_session_reply_too_long:PASS
+tests/lab-test.c:1203:test_run_smtp_session_io_errors:PASS
+tests/lab-test.c:1204:test_run_smtp_session_invalid_message:PASS
+tests/lab-test.c:1205:test_run_smtp_session_args:PASS
+tests/lab-test.c:1206:test_socket_read_write:PASS
+tests/lab-test.c:1207:test_socket_session:PASS
+tests/lab-test.c:1208:test_socket_session_server_hangs_up:PASS
+tests/lab-test.c:1209:test_socket_connect_refused:PASS
+tests/lab-test.c:1210:test_socket_connect_bad_address:PASS
 
 -----------------------
-1 Tests 0 Failures 0 Ignored 
+39 Tests 0 Failures 0 Ignored 
 OK
 ./build/tests/myapp_t
-Setting up tests...
-Tearing down tests...
-tests/lab-test.c:32:test_get_greeting:PASS
+tests/lab-test.c:1172:test_has_crlf:PASS
+tests/lab-test.c:1173:test_parse_reply_code:PASS
+tests/lab-test.c:1174:test_is_final_reply_line:PASS
+tests/lab-test.c:1175:test_build_command:PASS
+tests/lab-test.c:1176:test_build_envelope_command:PASS
+tests/lab-test.c:1177:test_dot_stuff:PASS
+tests/lab-test.c:1178:test_build_data_payload:PASS
+tests/lab-test.c:1179:test_transport_init:PASS
+tests/lab-test.c:1180:test_read_line:PASS
+tests/lab-test.c:1181:test_read_line_several_lines_in_one_read:PASS
+tests/lab-test.c:1182:test_read_line_a_few_bytes_at_a_time:PASS
+tests/lab-test.c:1183:test_read_line_too_long_for_caller:PASS
+tests/lab-test.c:1184:test_read_line_too_long_for_buffer:PASS
+tests/lab-test.c:1185:test_read_line_errors:PASS
+tests/lab-test.c:1186:test_read_full_reply_single_line:PASS
+tests/lab-test.c:1187:test_read_full_reply_multi_line:PASS
+tests/lab-test.c:1188:test_read_full_reply_malformed:PASS
+tests/lab-test.c:1189:test_read_full_reply_too_long:PASS
+tests/lab-test.c:1190:test_read_full_reply_hang_up:PASS
+tests/lab-test.c:1191:test_read_full_reply_args:PASS
+tests/lab-test.c:1192:test_write_all:PASS
+tests/lab-test.c:1193:test_expect_reply:PASS
+tests/lab-test.c:1194:test_send_command:PASS
+tests/lab-test.c:1195:test_run_smtp_session_happy:PASS
+tests/lab-test.c:1196:test_run_smtp_session_multi_line_replies:PASS
+tests/lab-test.c:1197:test_run_smtp_session_dot_stuffing:PASS
+tests/lab-test.c:1198:test_run_smtp_session_wrong_codes:PASS
+tests/lab-test.c:1199:test_run_smtp_session_multi_line_rejection:PASS
+tests/lab-test.c:1200:test_run_smtp_session_hang_up:PASS
+tests/lab-test.c:1201:test_run_smtp_session_malformed_reply:PASS
+tests/lab-test.c:1202:test_run_smtp_session_reply_too_long:PASS
+tests/lab-test.c:1203:test_run_smtp_session_io_errors:PASS
+tests/lab-test.c:1204:test_run_smtp_session_invalid_message:PASS
+tests/lab-test.c:1205:test_run_smtp_session_args:PASS
+tests/lab-test.c:1206:test_socket_read_write:PASS
+tests/lab-test.c:1207:test_socket_session:PASS
+tests/lab-test.c:1208:test_socket_session_server_hangs_up:PASS
+tests/lab-test.c:1209:test_socket_connect_refused:PASS
+tests/lab-test.c:1210:test_socket_connect_bad_address:PASS
 
 -----------------------
-1 Tests 0 Failures 0 Ignored 
+39 Tests 0 Failures 0 Ignored 
 OK
 mkdir -p ./build/report/html
 mkdir -p ./build/report/txt
@@ -130,9 +277,9 @@ Directory: .
 ------------------------------------------------------------------------------
 File                                       Lines     Exec  Cover   Missing
 ------------------------------------------------------------------------------
-src/lab.c                                      8        8   100%
+src/lab.c                                    211      211   100%
 ------------------------------------------------------------------------------
-TOTAL                                          8        8   100%
+TOTAL                                        211      211   100%
 ------------------------------------------------------------------------------
 ```
 
@@ -143,12 +290,48 @@ TOTAL                                          8        8   100%
 This section was generated by running `make leak-test` in the project root directory.
 
 ```bash
-Setting up tests...
-Tearing down tests...
-tests/lab-test.c:32:test_get_greeting:PASS
+tests/lab-test.c:1172:test_has_crlf:PASS
+tests/lab-test.c:1173:test_parse_reply_code:PASS
+tests/lab-test.c:1174:test_is_final_reply_line:PASS
+tests/lab-test.c:1175:test_build_command:PASS
+tests/lab-test.c:1176:test_build_envelope_command:PASS
+tests/lab-test.c:1177:test_dot_stuff:PASS
+tests/lab-test.c:1178:test_build_data_payload:PASS
+tests/lab-test.c:1179:test_transport_init:PASS
+tests/lab-test.c:1180:test_read_line:PASS
+tests/lab-test.c:1181:test_read_line_several_lines_in_one_read:PASS
+tests/lab-test.c:1182:test_read_line_a_few_bytes_at_a_time:PASS
+tests/lab-test.c:1183:test_read_line_too_long_for_caller:PASS
+tests/lab-test.c:1184:test_read_line_too_long_for_buffer:PASS
+tests/lab-test.c:1185:test_read_line_errors:PASS
+tests/lab-test.c:1186:test_read_full_reply_single_line:PASS
+tests/lab-test.c:1187:test_read_full_reply_multi_line:PASS
+tests/lab-test.c:1188:test_read_full_reply_malformed:PASS
+tests/lab-test.c:1189:test_read_full_reply_too_long:PASS
+tests/lab-test.c:1190:test_read_full_reply_hang_up:PASS
+tests/lab-test.c:1191:test_read_full_reply_args:PASS
+tests/lab-test.c:1192:test_write_all:PASS
+tests/lab-test.c:1193:test_expect_reply:PASS
+tests/lab-test.c:1194:test_send_command:PASS
+tests/lab-test.c:1195:test_run_smtp_session_happy:PASS
+tests/lab-test.c:1196:test_run_smtp_session_multi_line_replies:PASS
+tests/lab-test.c:1197:test_run_smtp_session_dot_stuffing:PASS
+tests/lab-test.c:1198:test_run_smtp_session_wrong_codes:PASS
+tests/lab-test.c:1199:test_run_smtp_session_multi_line_rejection:PASS
+tests/lab-test.c:1200:test_run_smtp_session_hang_up:PASS
+tests/lab-test.c:1201:test_run_smtp_session_malformed_reply:PASS
+tests/lab-test.c:1202:test_run_smtp_session_reply_too_long:PASS
+tests/lab-test.c:1203:test_run_smtp_session_io_errors:PASS
+tests/lab-test.c:1204:test_run_smtp_session_invalid_message:PASS
+tests/lab-test.c:1205:test_run_smtp_session_args:PASS
+tests/lab-test.c:1206:test_socket_read_write:PASS
+tests/lab-test.c:1207:test_socket_session:PASS
+tests/lab-test.c:1208:test_socket_session_server_hangs_up:PASS
+tests/lab-test.c:1209:test_socket_connect_refused:PASS
+tests/lab-test.c:1210:test_socket_connect_bad_address:PASS
 
 -----------------------
-1 Tests 0 Failures 0 Ignored 
+39 Tests 0 Failures 0 Ignored 
 OK
 ```
 
@@ -159,39 +342,407 @@ OK
 
 ```c
 
+#define _POSIX_C_SOURCE 200809L
 #include "lab.h"
+#include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
-char *get_greeting(const char *restrict name)
-{
-  if (name == NULL)
-  {
-    return NULL;
-  }
+// send() raises SIGPIPE when the peer has gone away; ask for EPIPE instead.
+#ifdef MSG_NOSIGNAL
+#define SEND_FLAGS MSG_NOSIGNAL
+#else
+#define SEND_FLAGS 0
+#endif
 
-  // Allocate memory for the greeting message
-  int length = snprintf(NULL, 0, "Hello, %s!", name);
-  if (length < 0) // GCOVR_EXCL_START
-  {
-    return NULL; // snprintf failed
-  } // GCOVR_EXCL_STOP
+__attribute__((format(printf, 3, 4)))
+static void set_error(char *err, size_t err_size, const char *fmt, ...) {
+    if (!err || err_size == 0) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(err, err_size, fmt, ap);
+    va_end(ap);
+}
 
-  //Casting is safe here because we know length is non-negative
-  size_t alloc_size = (size_t) length + 1; // +1 for the null terminator
-  char *greeting = malloc( alloc_size);
+/**
+ * LAYER 1: Pure Protocol Helpers
+ */
 
+bool has_crlf(const char *s) {
+    return s && strpbrk(s, "\r\n") != NULL;
+}
 
-  if (greeting == NULL) // GCOVR_EXCL_START
-  {
-    return NULL; // Memory allocation failed
-  }  // GCOVR_EXCL_STOP
+int parse_reply_code(const char *reply_line) {
+    if (!reply_line) return -1;
+    const char *s = reply_line;
 
+    // Reply-code = %x32-35 %x30-35 %x30-39 (RFC 5321 section 4.2)
+    if (s[0] < '2' || s[0] > '5' || s[1] < '0' || s[1] > '5' ||
+        s[2] < '0' || s[2] > '9') {
+        return -1;
+    }
+    // The code is followed by SP, "-" or the end of the line.
+    if (s[3] != ' ' && s[3] != '-' && s[3] != '\r' && s[3] != '\n' && s[3] != '\0') {
+        return -1;
+    }
+    return (s[0] - '0') * 100 + (s[1] - '0') * 10 + (s[2] - '0');
+}
 
-  // Create the greeting message
-  snprintf(greeting, alloc_size, "Hello, %s!", name);
+bool is_final_reply_line(const char *reply_line) {
+    // Only a valid line with a hyphen after the code is a continuation.
+    return parse_reply_code(reply_line) < 0 || reply_line[3] != '-';
+}
 
-  return greeting;
+char *build_command(const char *verb, const char *arg) {
+    if (!verb || has_crlf(verb) || has_crlf(arg)) return NULL;
+
+    int len = arg ? snprintf(NULL, 0, "%s %s\r\n", verb, arg)
+                  : snprintf(NULL, 0, "%s\r\n", verb);
+    if (len < 0) { // GCOVR_EXCL_START
+        return NULL;
+    } // GCOVR_EXCL_STOP
+
+    size_t size = (size_t)len + 1;
+    char *res = malloc(size);
+    if (!res) { // GCOVR_EXCL_START
+        return NULL;
+    } // GCOVR_EXCL_STOP
+
+    if (arg) {
+        snprintf(res, size, "%s %s\r\n", verb, arg);
+    } else {
+        snprintf(res, size, "%s\r\n", verb);
+    }
+    return res;
+}
+
+char *build_envelope_command(const char *verb, const char *address) {
+    if (!verb || !address || has_crlf(verb) || has_crlf(address)) return NULL;
+
+    int len = snprintf(NULL, 0, "%s:<%s>\r\n", verb, address);
+    if (len < 0) { // GCOVR_EXCL_START
+        return NULL;
+    } // GCOVR_EXCL_STOP
+
+    size_t size = (size_t)len + 1;
+    char *res = malloc(size);
+    if (!res) { // GCOVR_EXCL_START
+        return NULL;
+    } // GCOVR_EXCL_STOP
+
+    snprintf(res, size, "%s:<%s>\r\n", verb, address);
+    return res;
+}
+
+// Writes the wire form of body into out and returns its length. With out
+// NULL it only counts, so dot_stuff can allocate exactly once.
+static size_t stuff_into(const char *body, char *out) {
+    size_t n = 0;
+    bool line_start = true;
+
+    for (const char *p = body; *p != '\0'; p++) {
+        if (*p == '\r' || *p == '\n') {
+            // LF, CRLF and a bare CR all end a line, and all become CRLF.
+            if (p[0] == '\r' && p[1] == '\n') p++;
+            if (out) {
+                out[n] = '\r';
+                out[n + 1] = '\n';
+            }
+            n += 2;
+            line_start = true;
+            continue;
+        }
+        // A line that starts with a period gets a second one.
+        if (line_start && *p == '.') {
+            if (out) out[n] = '.';
+            n++;
+        }
+        if (out) out[n] = *p;
+        n++;
+        line_start = false;
+    }
+    return n;
+}
+
+char *dot_stuff(const char *body) {
+    if (!body) return NULL;
+
+    size_t len = stuff_into(body, NULL);
+    char *res = malloc(len + 1);
+    if (!res) { // GCOVR_EXCL_START
+        return NULL;
+    } // GCOVR_EXCL_STOP
+
+    stuff_into(body, res);
+    res[len] = '\0';
+    return res;
+}
+
+// Headers, blank line, body, and the "." line that ends the message.
+#define PAYLOAD_FMT "From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s%s.\r\n"
+
+char *build_data_payload(const char *from, const char *to, const char *subject, const char *body) {
+    if (!subject) subject = "";
+    if (!from || !to || has_crlf(from) || has_crlf(to) || has_crlf(subject)) {
+        return NULL;
+    }
+
+    char *stuffed = dot_stuff(body ? body : "");
+    if (!stuffed) { // GCOVR_EXCL_START
+        return NULL;
+    } // GCOVR_EXCL_STOP
+
+    // The final "." has to start a line, so a body that does not already
+    // end with CRLF gets one.
+    size_t stuffed_len = strlen(stuffed);
+    const char *eol = (stuffed_len > 0 && stuffed[stuffed_len - 1] != '\n') ? "\r\n" : "";
+
+    int len = snprintf(NULL, 0, PAYLOAD_FMT, from, to, subject, stuffed, eol);
+    if (len < 0) { // GCOVR_EXCL_START
+        free(stuffed);
+        return NULL;
+    } // GCOVR_EXCL_STOP
+
+    size_t size = (size_t)len + 1;
+    char *res = malloc(size);
+    if (!res) { // GCOVR_EXCL_START
+        free(stuffed);
+        return NULL;
+    } // GCOVR_EXCL_STOP
+
+    snprintf(res, size, PAYLOAD_FMT, from, to, subject, stuffed, eol);
+    free(stuffed);
+    return res;
+}
+
+/**
+ * LAYER 2: The Session
+ */
+
+void transport_init(transport_t *t, transport_read_fn read, transport_write_fn write, void *ctx) {
+    if (!t) return;
+    t->read = read;
+    t->write = write;
+    t->ctx = ctx;
+    t->len = 0;
+}
+
+int read_line(transport_t *t, char *line, size_t size) {
+    if (!t || !t->read || !line || size == 0) return SMTP_ERR_ARG;
+
+    while (1) {
+        // Hand out a line if the buffer already holds a complete one.
+        char *nl = memchr(t->buf, '\n', t->len);
+        if (nl) {
+            size_t consumed = (size_t)(nl - t->buf) + 1;
+            size_t n = consumed - 1;
+            if (n > 0 && t->buf[n - 1] == '\r') n--;
+            if (n >= size) return SMTP_ERR_TOO_LONG;
+
+            memcpy(line, t->buf, n);
+            line[n] = '\0';
+            t->len -= consumed;
+            memmove(t->buf, t->buf + consumed, t->len);
+            return (int)n;
+        }
+
+        // Otherwise refill it, unless a whole buffer holds no line ending.
+        size_t room = sizeof(t->buf) - t->len;
+        if (room == 0) return SMTP_ERR_TOO_LONG;
+
+        ssize_t got = t->read(t->ctx, t->buf + t->len, room);
+        if (got == 0) return SMTP_ERR_CLOSED;
+        if (got < 0 || (size_t)got > room) return SMTP_ERR_IO;
+        t->len += (size_t)got;
+    }
+}
+
+int read_full_reply(transport_t *t, char *reply, size_t size) {
+    if (!t || !reply || size == 0) return SMTP_ERR_ARG;
+
+    char line[SMTP_LINE_MAX];
+    size_t used = 0;
+    int first_code = -1;
+    reply[0] = '\0';
+
+    while (1) {
+        int n = read_line(t, line, sizeof(line));
+        if (n < 0) return n;
+
+        // Keep every line, even a bad one, so the caller can report it.
+        size_t sep = used > 0 ? 1 : 0;
+        if (used + sep + (size_t)n >= size) return SMTP_ERR_TOO_LONG;
+        if (sep) reply[used++] = '\n';
+        memcpy(reply + used, line, (size_t)n + 1);
+        used += (size_t)n;
+
+        // Every line of a multi-line reply must carry the same code.
+        int code = parse_reply_code(line);
+        if (code < 0 || (first_code >= 0 && code != first_code)) {
+            return SMTP_ERR_SYNTAX;
+        }
+        first_code = code;
+
+        if (is_final_reply_line(line)) return code;
+    }
+}
+
+int write_all(transport_t *t, const char *data, size_t len) {
+    if (!t || !t->write || !data) return SMTP_ERR_ARG;
+
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = t->write(t->ctx, data + sent, len - sent);
+        if (n <= 0 || (size_t)n > len - sent) return SMTP_ERR_IO;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+int expect_reply(transport_t *t, int expected, char *reply, size_t size) {
+    int code = read_full_reply(t, reply, size);
+    if (code < 0) return code;
+    return code == expected ? 0 : SMTP_ERR_UNEXPECTED;
+}
+
+int send_command(transport_t *t, const char *cmd, int expected, char *reply, size_t size) {
+    if (!cmd) return SMTP_ERR_ARG;
+
+    int rc = write_all(t, cmd, strlen(cmd));
+    if (rc < 0) return rc;
+    return expect_reply(t, expected, reply, size);
+}
+
+// Turns a failed step into a message that says what the server sent.
+static void describe_failure(char *err, size_t err_size, const char *step,
+                             int expected, int rc, const char *reply) {
+    switch (rc) {
+        case SMTP_ERR_UNEXPECTED:
+            set_error(err, err_size, "%s: expected %d but the server replied: %s",
+                      step, expected, reply);
+            break;
+        case SMTP_ERR_SYNTAX:
+            set_error(err, err_size, "%s: the server sent a malformed reply: %s", step, reply);
+            break;
+        case SMTP_ERR_CLOSED:
+            set_error(err, err_size, "%s: the server closed the connection", step);
+            break;
+        case SMTP_ERR_TOO_LONG:
+            set_error(err, err_size, "%s: the server's reply is too long", step);
+            break;
+        default:
+            set_error(err, err_size, "%s: error reading from or writing to the connection", step);
+            break;
+    }
+}
+
+int run_smtp_session(transport_t *t, const smtp_message_t *msg, char *err, size_t err_size) {
+    set_error(err, err_size, "%s", "");
+    if (!t || !msg) {
+        set_error(err, err_size, "no transport or message");
+        return 2;
+    }
+
+    enum { STEPS = 7 };
+    const char *names[STEPS] = {
+        "greeting", "HELO", "MAIL FROM", "RCPT TO", "DATA", "end of data", "QUIT"
+    };
+    const int expected[STEPS] = { 220, 250, 250, 250, 354, 250, 221 };
+
+    // Build every command up front so a bad message sends nothing at all.
+    char *cmds[STEPS] = {
+        NULL, // the greeting is only read
+        msg->helo ? build_command("HELO", msg->helo) : NULL,
+        build_envelope_command("MAIL FROM", msg->from),
+        build_envelope_command("RCPT TO", msg->to),
+        build_command("DATA", NULL),
+        build_data_payload(msg->from, msg->to, msg->subject, msg->body),
+        build_command("QUIT", NULL),
+    };
+
+    int result = 0;
+    for (int i = 1; i < STEPS; i++) {
+        if (!cmds[i]) {
+            set_error(err, err_size, "invalid message: a value is missing, or an address, "
+                                     "subject or host name contains a CR or LF");
+            result = 2;
+            break;
+        }
+    }
+
+    char reply[4 * SMTP_LINE_MAX];
+    reply[0] = '\0';
+    for (int i = 0; i < STEPS && result == 0; i++) {
+        int rc = cmds[i] ? send_command(t, cmds[i], expected[i], reply, sizeof(reply))
+                         : expect_reply(t, expected[i], reply, sizeof(reply));
+        if (rc != 0) {
+            describe_failure(err, err_size, names[i], expected[i], rc, reply);
+            result = 2;
+        }
+    }
+
+    for (int i = 0; i < STEPS; i++) {
+        free(cmds[i]);
+    }
+    return result;
+}
+
+/**
+ * LAYER 3: The Socket Transport
+ */
+
+int socket_connect(const char *host, const char *port, char *err, size_t err_size) {
+    if (!host || !port) {
+        set_error(err, err_size, "no server or port given");
+        return -1;
+    }
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC; // IPv4 or IPv6
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = NULL;
+    int rc = getaddrinfo(host, port, &hints, &res);
+    if (rc != 0) {
+        set_error(err, err_size, "cannot resolve %s port %s: %s", host, port, gai_strerror(rc));
+        return -1;
+    }
+
+    // Try each address in turn until one accepts the connection.
+    int fd = -1;
+    int saved_errno = 0;
+    for (struct addrinfo *p = res; p; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) { // GCOVR_EXCL_START
+            saved_errno = errno;
+            continue;
+        } // GCOVR_EXCL_STOP
+        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+
+        saved_errno = errno;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+
+    if (fd < 0) {
+        set_error(err, err_size, "cannot connect to %s port %s: %s", host, port, strerror(saved_errno));
+    }
+    return fd;
+}
+
+ssize_t socket_read(void *ctx, char *buf, size_t len) {
+    return recv(*(int *)ctx, buf, len, 0);
+}
+
+ssize_t socket_write(void *ctx, const char *data, size_t len) {
+    return send(*(int *)ctx, data, len, SEND_FLAGS);
 }
 
 ```
@@ -203,15 +754,275 @@ char *get_greeting(const char *restrict name)
 #ifndef LAB_H
 #define LAB_H
 
-/** * @brief Returns a greeting message.
- *
- * This function returns a string that contains a greeting message.
- * The string is allocated with malloc and should be freed by the caller.
- * @param name The name to include in the greeting.
- * @return A greeting string.
- */
-char* get_greeting(const char* restrict name);
+#include <stdbool.h>
+#include <stddef.h>
+#include <sys/types.h>
 
+/*
+ * The client is split into three layers so that everything except the
+ * socket calls themselves can be unit tested without a network:
+ *
+ *   1. Pure protocol helpers  - strings in, strings or codes out, no I/O.
+ *   2. The session            - line reader, reply reader and the SMTP
+ *                               command sequence, all done through the
+ *                               read/write callbacks in transport_t.
+ *   3. The socket transport   - getaddrinfo/connect/recv/send wrappers that
+ *                               satisfy those callbacks.
+ */
+
+/* RFC 5321 4.5.3.1.5 caps a reply line at 512 octets; allow some slack. */
+#define SMTP_LINE_MAX 1024
+
+/* Error values returned by the layer 2 functions. All are negative. */
+#define SMTP_ERR_ARG        -1 /* a required argument was NULL or empty */
+#define SMTP_ERR_IO         -2 /* the read or write callback failed */
+#define SMTP_ERR_CLOSED     -3 /* the server hung up */
+#define SMTP_ERR_TOO_LONG   -4 /* a line or reply did not fit its buffer */
+#define SMTP_ERR_SYNTAX     -5 /* the server sent something that is not a reply */
+#define SMTP_ERR_UNEXPECTED -6 /* a valid reply arrived with the wrong code */
+
+/* ------------------------------------------------------------------------
+ * LAYER 1: Pure protocol helpers
+ * ------------------------------------------------------------------------ */
+
+/**
+ * @brief Checks a string for CR or LF characters.
+ *
+ * A CR or LF inside an address, subject or host name would let whoever
+ * supplied it inject an extra SMTP command or mail header.
+ *
+ * @param s The string to check, may be NULL.
+ * @return true if s contains a CR or LF, false otherwise (including NULL).
+ */
+bool has_crlf(const char *s);
+
+/**
+ * @brief Parses the three digit code at the start of a reply line.
+ *
+ * The code must match RFC 5321 (first digit 2-5, second 0-5, third 0-9)
+ * and be followed by a space, a hyphen or the end of the line.
+ *
+ * @param reply_line One line of a server reply, with or without its CRLF.
+ * @return The reply code, or -1 if the line is not a valid reply line.
+ */
+int parse_reply_code(const char *reply_line);
+
+/**
+ * @brief Decides whether a reply line is the last line of its reply.
+ *
+ * Every line but the last has a hyphen after the code ("250-PIPELINING").
+ * A line that is not a valid reply line is never a continuation.
+ *
+ * @param reply_line One line of a server reply.
+ * @return false only for a valid continuation line, true otherwise.
+ */
+bool is_final_reply_line(const char *reply_line);
+
+/**
+ * @brief Builds a command line such as "HELO example.com\r\n".
+ *
+ * @param verb The command verb, for example "HELO" or "DATA".
+ * @param arg  The argument, or NULL for a command without one.
+ * @return A malloc'd CRLF terminated line the caller must free, or NULL if
+ *         verb is NULL or either string contains a CR or LF.
+ */
+char *build_command(const char *verb, const char *arg);
+
+/**
+ * @brief Builds an envelope command such as "MAIL FROM:<a@b.com>\r\n".
+ *
+ * @param verb    "MAIL FROM" or "RCPT TO".
+ * @param address The mailbox, without angle brackets.
+ * @return A malloc'd CRLF terminated line the caller must free, or NULL if
+ *         either argument is NULL or contains a CR or LF.
+ */
+char *build_envelope_command(const char *verb, const char *address);
+
+/**
+ * @brief Converts a message body into the form it takes on the wire.
+ *
+ * Every line ending (LF, CRLF or a bare CR) becomes CRLF, and every line
+ * that starts with a period gets a second one (RFC 5321 4.5.2). The
+ * terminating "." line is not added here.
+ *
+ * @param body The message body, may use any line endings.
+ * @return A malloc'd string the caller must free, or NULL if body is NULL.
+ */
+char *dot_stuff(const char *body);
+
+/**
+ * @brief Builds everything the client sends after the 354 reply to DATA.
+ *
+ * That is the From, To and Subject headers, a blank line, the dot stuffed
+ * body ending in CRLF, and the "." line that ends the message.
+ *
+ * @param from    The From header value.
+ * @param to      The To header value.
+ * @param subject The Subject header value, NULL is treated as empty.
+ * @param body    The message body, NULL is treated as empty.
+ * @return A malloc'd string the caller must free, or NULL if from or to is
+ *         NULL or any header value contains a CR or LF.
+ */
+char *build_data_payload(const char *from, const char *to,
+                         const char *subject, const char *body);
+
+/* ------------------------------------------------------------------------
+ * LAYER 2: The session, over a swappable transport
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Reads up to len bytes into buf, like recv(2).
+ * Returns the number of bytes read, 0 when the peer has hung up, or -1.
+ */
+typedef ssize_t (*transport_read_fn)(void *ctx, char *buf, size_t len);
+
+/**
+ * Writes up to len bytes from data, like send(2).
+ * Returns the number of bytes written (possibly fewer than len), or -1.
+ */
+typedef ssize_t (*transport_write_fn)(void *ctx, const char *data, size_t len);
+
+/**
+ * A byte stream plus the buffer the line reader keeps between calls. The
+ * real client points the callbacks at a socket; the tests point them at a
+ * scripted in-memory server.
+ */
+typedef struct {
+    transport_read_fn read;
+    transport_write_fn write;
+    void *ctx;
+    char buf[SMTP_LINE_MAX]; /* bytes received but not yet returned */
+    size_t len;              /* number of valid bytes in buf */
+} transport_t;
+
+/** The message a session sends. */
+typedef struct {
+    const char *helo;    /* host name sent with HELO */
+    const char *from;    /* envelope sender and From header */
+    const char *to;      /* envelope recipient and To header */
+    const char *subject; /* Subject header, NULL means empty */
+    const char *body;    /* message body, NULL means empty */
+} smtp_message_t;
+
+/**
+ * @brief Initializes a transport with an empty read buffer.
+ *
+ * @param t     The transport to initialize.
+ * @param read  The read callback.
+ * @param write The write callback.
+ * @param ctx   Passed unchanged to both callbacks.
+ */
+void transport_init(transport_t *t, transport_read_fn read,
+                    transport_write_fn write, void *ctx);
+
+/**
+ * @brief Reads one line from the transport.
+ *
+ * The buffer is only refilled when it does not already hold a complete
+ * line, so a line split across reads and several lines arriving in one read
+ * are both handled. The line ending (LF or CRLF) is removed.
+ *
+ * @param t    The transport.
+ * @param line Receives the NUL terminated line.
+ * @param size The size of line.
+ * @return The length of the line, or SMTP_ERR_ARG, SMTP_ERR_IO,
+ *         SMTP_ERR_CLOSED or SMTP_ERR_TOO_LONG.
+ */
+int read_line(transport_t *t, char *line, size_t size);
+
+/**
+ * @brief Reads a complete reply, following continuation lines.
+ *
+ * The lines are stored in reply separated by '\n'. When a line is not a
+ * valid reply line it is still stored, so the caller can report it.
+ *
+ * @param t     The transport.
+ * @param reply Receives the reply text.
+ * @param size  The size of reply.
+ * @return The reply code, or SMTP_ERR_ARG, SMTP_ERR_IO, SMTP_ERR_CLOSED,
+ *         SMTP_ERR_TOO_LONG or SMTP_ERR_SYNTAX (also used when the lines of
+ *         one reply carry different codes).
+ */
+int read_full_reply(transport_t *t, char *reply, size_t size);
+
+/**
+ * @brief Writes all len bytes, retrying after short writes.
+ *
+ * @param t    The transport.
+ * @param data The bytes to write.
+ * @param len  The number of bytes to write.
+ * @return 0 on success, SMTP_ERR_ARG or SMTP_ERR_IO.
+ */
+int write_all(transport_t *t, const char *data, size_t len);
+
+/**
+ * @brief Reads a reply and checks its code.
+ *
+ * @param t        The transport.
+ * @param expected The code the protocol requires at this point.
+ * @param reply    Receives the reply text.
+ * @param size     The size of reply.
+ * @return 0 if the reply carried the expected code, SMTP_ERR_UNEXPECTED if
+ *         it carried another one (the text is in reply), or any error from
+ *         read_full_reply.
+ */
+int expect_reply(transport_t *t, int expected, char *reply, size_t size);
+
+/**
+ * @brief Sends one command and checks the code of the reply.
+ *
+ * @param t        The transport.
+ * @param cmd      The complete command, including its CRLF.
+ * @param expected The code the protocol requires in reply.
+ * @param reply    Receives the reply text.
+ * @param size     The size of reply.
+ * @return The same values as expect_reply, or SMTP_ERR_ARG / SMTP_ERR_IO
+ *         if the command could not be written.
+ */
+int send_command(transport_t *t, const char *cmd, int expected,
+                 char *reply, size_t size);
+
+/**
+ * @brief Runs a whole SMTP session: greeting, HELO, MAIL FROM, RCPT TO,
+ * DATA, the message and QUIT, requiring 220, 250, 250, 250, 354, 250, 221.
+ *
+ * The session stops at the first failure without sending anything else.
+ *
+ * @param t        The transport, already connected.
+ * @param msg      The message to send.
+ * @param err      Receives a description of the failure, may be NULL.
+ * @param err_size The size of err.
+ * @return 0 when the server queued the message, 2 otherwise.
+ */
+int run_smtp_session(transport_t *t, const smtp_message_t *msg,
+                     char *err, size_t err_size);
+
+/* ------------------------------------------------------------------------
+ * LAYER 3: The socket transport
+ * ------------------------------------------------------------------------ */
+
+/**
+ * @brief Resolves host with getaddrinfo and connects to the first address
+ * that accepts a TCP connection.
+ *
+ * @param host     Host name or address of the server.
+ * @param port     Port number or service name.
+ * @param err      Receives a description of the failure, may be NULL.
+ * @param err_size The size of err.
+ * @return A connected socket the caller must close, or -1.
+ */
+int socket_connect(const char *host, const char *port,
+                   char *err, size_t err_size);
+
+/**
+ * @brief transport_read_fn over recv(2). ctx points at an int socket.
+ */
+ssize_t socket_read(void *ctx, char *buf, size_t len);
+
+/**
+ * @brief transport_write_fn over send(2). ctx points at an int socket.
+ */
+ssize_t socket_write(void *ctx, const char *data, size_t len);
 
 #endif // LAB_H
 
@@ -221,27 +1032,148 @@ char* get_greeting(const char* restrict name);
 
 ```c
 
+#define _POSIX_C_SOURCE 200809L
 #include "lab.h"
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #ifdef TEST
 #define main main_exclude
 #endif
 
+static const char *usage_text =
+    "Usage: myapp -f <from> -t <to> [-s subject] [-b body] [-p port]\n"
+    "          [-H helo-host] <server>\n"
+    "\n"
+    "  -f <from>       envelope sender, for example you@example.com\n"
+    "  -t <to>         envelope recipient\n"
+    "  -s <subject>    subject line (default: empty)\n"
+    "  -b <body>       message body (default: read from stdin)\n"
+    "  -p <port>       port or service name (default: 25)\n"
+    "  -H <helo-host>  host name sent with HELO (default: localhost)\n"
+    "  <server>        host name or address of the mail server\n";
 
+// Reads all of stdin into a malloc'd string. Returns NULL on failure.
+static char *read_stdin(void) {
+    size_t cap = 1024;
+    size_t len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
 
-int main(void)
-{
-    char *greeting = get_greeting("World");
-    if (greeting) {
-        printf("%s\n", greeting);
-        free(greeting); // Free the allocated memory for the greeting
-    } else {
-        printf("Failed to create greeting.\n");
+    while (1) {
+        if (cap - len < 256) {
+            cap *= 2;
+            char *bigger = realloc(buf, cap);
+            if (!bigger) {
+                free(buf);
+                return NULL;
+            }
+            buf = bigger;
+        }
+        size_t n = fread(buf + len, 1, cap - len - 1, stdin);
+        len += n;
+        if (n == 0) break;
     }
-    return 0;
+    if (ferror(stdin)) {
+        free(buf);
+        return NULL;
+    }
+    buf[len] = '\0';
+    return buf;
 }
+
+int main(int argc, char *argv[]) {
+    if (argc == 1) {
+        fputs(usage_text, stdout);
+        return 0;
+    }
+
+    const char *from = NULL;
+    const char *to = NULL;
+    const char *subject = "";
+    const char *body = NULL;
+    const char *port = "25";
+    const char *helo_host = "localhost";
+
+    int opt;
+    while ((opt = getopt(argc, argv, "f:t:s:b:p:H:")) != -1) {
+        switch (opt) {
+            case 'f': from = optarg; break;
+            case 't': to = optarg; break;
+            case 's': subject = optarg; break;
+            case 'b': body = optarg; break;
+            case 'p': port = optarg; break;
+            case 'H': helo_host = optarg; break;
+            default:
+                fputs(usage_text, stderr);
+                return 1;
+        }
+    }
+
+    if (!from || !to) {
+        fprintf(stderr, "myapp: -f <from> and -t <to> are required\n");
+        fputs(usage_text, stderr);
+        return 1;
+    }
+    if (optind != argc - 1) {
+        fprintf(stderr, "myapp: expected exactly one <server>\n");
+        fputs(usage_text, stderr);
+        return 1;
+    }
+    const char *server = argv[optind];
+
+    // A CR or LF here would let the caller inject SMTP commands or headers.
+    if (has_crlf(from) || has_crlf(to) || has_crlf(subject) || has_crlf(helo_host)) {
+        fprintf(stderr, "myapp: addresses, subject and HELO host must not contain CR or LF\n");
+        return 1;
+    }
+
+    char *stdin_body = NULL;
+    if (!body) {
+        stdin_body = read_stdin();
+        if (!stdin_body) {
+            fprintf(stderr, "myapp: failed to read the message body from stdin\n");
+            return 1;
+        }
+        body = stdin_body;
+    }
+
+    // Writing to a socket the server has closed must not kill the process.
+    signal(SIGPIPE, SIG_IGN);
+
+    char err[512];
+    int fd = socket_connect(server, port, err, sizeof(err));
+    if (fd < 0) {
+        fprintf(stderr, "myapp: %s\n", err);
+        free(stdin_body);
+        return 2;
+    }
+
+    transport_t transport;
+    transport_init(&transport, socket_read, socket_write, &fd);
+
+    smtp_message_t msg = {
+        .helo = helo_host,
+        .from = from,
+        .to = to,
+        .subject = subject,
+        .body = body,
+    };
+    int result = run_smtp_session(&transport, &msg, err, sizeof(err));
+    if (result != 0) {
+        fprintf(stderr, "myapp: %s\n", err);
+    } else {
+        printf("Message queued for delivery to %s\n", to);
+    }
+
+    close(fd);
+    free(stdin_body);
+    return result;
+}
+
 ```
 
 ## Tests Files
@@ -251,55 +1183,1233 @@ int main(void)
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "harness/unity.h"
 #include "../src/lab.h"
 
+void setUp(void) {}
+void tearDown(void) {}
 
-void setUp(void) {
-  printf("Setting up tests...\n");
+/* ------------------------------------------------------------------------
+ * A scripted in-memory server
+ * ------------------------------------------------------------------------ */
+
+typedef struct {
+    const char *script;   // everything the server will send
+    size_t len;
+    size_t pos;
+    size_t chunk;         // most bytes handed out per read, 0 = no limit
+    bool fail_at_end;     // read fails instead of reporting a hang-up
+    int reads;
+
+    char sent[8192];      // everything the client wrote
+    size_t sent_len;
+    size_t write_chunk;   // most bytes accepted per write, 0 = no limit
+    int fail_write_at;    // this write call fails, 0 = never
+    int writes;
+} mock_t;
+
+static ssize_t mock_read(void *ctx, char *buf, size_t len) {
+    mock_t *m = (mock_t *)ctx;
+    m->reads++;
+    size_t n = m->len - m->pos;
+    if (n == 0 && m->fail_at_end) return -1;
+    if (m->chunk && n > m->chunk) n = m->chunk;
+    if (n > len) n = len;
+    memcpy(buf, m->script + m->pos, n);
+    m->pos += n;
+    return (ssize_t)n;
 }
 
-void tearDown(void) {
-  printf("Tearing down tests...\n");
+static ssize_t mock_write(void *ctx, const char *data, size_t len) {
+    mock_t *m = (mock_t *)ctx;
+    m->writes++;
+    if (m->fail_write_at == m->writes) return -1;
+    if (m->write_chunk && len > m->write_chunk) len = m->write_chunk;
+    if (len >= sizeof(m->sent) - m->sent_len) return -1;
+    memcpy(m->sent + m->sent_len, data, len);
+    m->sent_len += len;
+    m->sent[m->sent_len] = '\0';
+    return (ssize_t)len;
 }
 
-void test_get_greeting(void) {
-  char *greeting = get_greeting("Alice");
-  TEST_ASSERT_NOT_NULL(greeting);
-  TEST_ASSERT_EQUAL_STRING("Hello, Alice!", greeting);
-  free(greeting); // Free the allocated memory for the greeting
+static ssize_t failing_read(void *ctx, char *buf, size_t len) {
+    (void)ctx; (void)buf; (void)len;
+    return -1;
+}
 
-  greeting = get_greeting(NULL);
-  TEST_ASSERT_NULL(greeting);
+static ssize_t oversized_read(void *ctx, char *buf, size_t len) {
+    (void)ctx; (void)buf;
+    return (ssize_t)len + 1;
+}
 
-  greeting = get_greeting("");
-  TEST_ASSERT_NOT_NULL(greeting);
-  TEST_ASSERT_EQUAL_STRING("Hello, !", greeting);
-  free(greeting);
+static ssize_t failing_write(void *ctx, const char *data, size_t len) {
+    (void)ctx; (void)data; (void)len;
+    return -1;
+}
+
+static ssize_t zero_write(void *ctx, const char *data, size_t len) {
+    (void)ctx; (void)data; (void)len;
+    return 0;
+}
+
+static ssize_t oversized_write(void *ctx, const char *data, size_t len) {
+    (void)ctx; (void)data;
+    return (ssize_t)len + 1;
+}
+
+static void mock_start(mock_t *m, transport_t *t, const char *script, size_t chunk) {
+    memset(m, 0, sizeof(*m));
+    m->script = script;
+    m->len = strlen(script);
+    m->chunk = chunk;
+    transport_init(t, mock_read, mock_write, m);
+}
+
+/* The session from the assignment, one reply and one command per step. */
+enum { STEPS = 7 };
+
+static const char *good_replies[STEPS] = {
+    "220 smtp.example.com ESMTP ready\r\n",
+    "250 smtp.example.com\r\n",
+    "250 2.1.0 Ok\r\n",
+    "250 2.1.5 Ok\r\n",
+    "354 End data with <CR><LF>.<CR><LF>\r\n",
+    "250 2.0.0 Ok: queued\r\n",
+    "221 2.0.0 Bye\r\n",
+};
+
+static const char *good_commands[STEPS] = {
+    "",
+    "HELO onyx.boisestate.edu\r\n",
+    "MAIL FROM:<me@boisestate.edu>\r\n",
+    "RCPT TO:<you@example.com>\r\n",
+    "DATA\r\n",
+    "From: me@boisestate.edu\r\n"
+    "To: you@example.com\r\n"
+    "Subject: hello\r\n"
+    "\r\n"
+    "This is the message body.\r\n"
+    ".\r\n",
+    "QUIT\r\n",
+};
+
+static const char *step_names[STEPS] = {
+    "greeting", "HELO", "MAIL FROM", "RCPT TO", "DATA", "end of data", "QUIT"
+};
+
+static const smtp_message_t good_msg = {
+    .helo = "onyx.boisestate.edu",
+    .from = "me@boisestate.edu",
+    .to = "you@example.com",
+    .subject = "hello",
+    .body = "This is the message body.\n", // what echo pipes in
+};
+
+// The server's side of the session: the replies before step `upto`, then
+// `replacement` in place of the reply to that step (NULL to stop there),
+// then the rest of the replies.
+static void build_script(char *out, size_t size, int upto, const char *replacement) {
+    out[0] = '\0';
+    for (int i = 0; i < STEPS; i++) {
+        const char *r = good_replies[i];
+        if (i == upto) {
+            if (!replacement) break;
+            r = replacement;
+        }
+        strncat(out, r, size - strlen(out) - 1);
+    }
+}
+
+// What the client should have sent by the time it reads the reply to `step`.
+static void build_transcript(char *out, size_t size, int step) {
+    out[0] = '\0';
+    for (int i = 1; i <= step && i < STEPS; i++) {
+        strncat(out, good_commands[i], size - strlen(out) - 1);
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * LAYER 1: Pure protocol helpers
+ * ------------------------------------------------------------------------ */
+
+void test_has_crlf(void) {
+    TEST_ASSERT_FALSE(has_crlf(NULL));
+    TEST_ASSERT_FALSE(has_crlf(""));
+    TEST_ASSERT_FALSE(has_crlf("you@example.com"));
+    TEST_ASSERT_TRUE(has_crlf("a\rb"));
+    TEST_ASSERT_TRUE(has_crlf("a\nb"));
+    TEST_ASSERT_TRUE(has_crlf("you@example.com>\r\nRCPT TO:<other@example.com"));
+}
+
+void test_parse_reply_code(void) {
+    TEST_ASSERT_EQUAL_INT(220, parse_reply_code("220 smtp.example.com ESMTP ready"));
+    TEST_ASSERT_EQUAL_INT(250, parse_reply_code("250-PIPELINING"));
+    TEST_ASSERT_EQUAL_INT(354, parse_reply_code("354 End data with ."));
+    TEST_ASSERT_EQUAL_INT(221, parse_reply_code("221"));
+    TEST_ASSERT_EQUAL_INT(250, parse_reply_code("250\r\n"));
+    TEST_ASSERT_EQUAL_INT(421, parse_reply_code("421\n"));
+    TEST_ASSERT_EQUAL_INT(559, parse_reply_code("559 highest code"));
+    TEST_ASSERT_EQUAL_INT(200, parse_reply_code("200 lowest code"));
+
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code(NULL));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code(""));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("2"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("22"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("abc"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code(" 250 leading space"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("150 first digit too low"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("650 first digit too high"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("2/0 second digit not a digit"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("260 second digit too high"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("25/ third digit not a digit"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("25a third digit not a digit"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("2500 four digits"));
+    TEST_ASSERT_EQUAL_INT(-1, parse_reply_code("250x"));
+}
+
+void test_is_final_reply_line(void) {
+    TEST_ASSERT_TRUE(is_final_reply_line("250 smtp.example.com"));
+    TEST_ASSERT_TRUE(is_final_reply_line("250 SIZE 10240000"));
+    TEST_ASSERT_FALSE(is_final_reply_line("250-smtp.example.com"));
+    TEST_ASSERT_FALSE(is_final_reply_line("250-"));
+    // A bare code is a complete reply line (RFC 5321 section 4.2).
+    TEST_ASSERT_TRUE(is_final_reply_line("250"));
+    TEST_ASSERT_TRUE(is_final_reply_line("250\r\n"));
+    // Lines that are not replies are never continuations.
+    TEST_ASSERT_TRUE(is_final_reply_line(NULL));
+    TEST_ASSERT_TRUE(is_final_reply_line(""));
+    TEST_ASSERT_TRUE(is_final_reply_line("25-x"));
+    TEST_ASSERT_TRUE(is_final_reply_line("abc-def"));
+}
+
+void test_build_command(void) {
+    char *cmd = build_command("HELO", "localhost");
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("HELO localhost\r\n", cmd);
+    free(cmd);
+
+    cmd = build_command("DATA", NULL);
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("DATA\r\n", cmd);
+    free(cmd);
+
+    cmd = build_command("QUIT", NULL);
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("QUIT\r\n", cmd);
+    free(cmd);
+
+    TEST_ASSERT_NULL(build_command(NULL, NULL));
+    TEST_ASSERT_NULL(build_command(NULL, "localhost"));
+    TEST_ASSERT_NULL(build_command("HE\rLO", "localhost"));
+    TEST_ASSERT_NULL(build_command("HELO", "localhost\r\nRSET"));
+    TEST_ASSERT_NULL(build_command("HELO", "localhost\n"));
+}
+
+void test_build_envelope_command(void) {
+    char *cmd = build_envelope_command("MAIL FROM", "me@boisestate.edu");
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("MAIL FROM:<me@boisestate.edu>\r\n", cmd);
+    free(cmd);
+
+    cmd = build_envelope_command("RCPT TO", "you@example.com");
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("RCPT TO:<you@example.com>\r\n", cmd);
+    free(cmd);
+
+    // The null reverse-path is legal.
+    cmd = build_envelope_command("MAIL FROM", "");
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("MAIL FROM:<>\r\n", cmd);
+    free(cmd);
+
+    // An address longer than any fixed buffer is not truncated.
+    char address[600];
+    memset(address, 'a', sizeof(address) - 1);
+    address[sizeof(address) - 1] = '\0';
+    cmd = build_envelope_command("RCPT TO", address);
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_size_t(strlen("RCPT TO:<>\r\n") + strlen(address), strlen(cmd));
+    free(cmd);
+
+    TEST_ASSERT_NULL(build_envelope_command(NULL, "me@boisestate.edu"));
+    TEST_ASSERT_NULL(build_envelope_command("MAIL FROM", NULL));
+    TEST_ASSERT_NULL(build_envelope_command("MAIL\nFROM", "me@boisestate.edu"));
+    TEST_ASSERT_NULL(build_envelope_command("RCPT TO", "a@b.com>\r\nRCPT TO:<c@d.com"));
+}
+
+static void assert_stuffed(const char *expected, const char *body) {
+    char *stuffed = dot_stuff(body);
+    TEST_ASSERT_NOT_NULL(stuffed);
+    TEST_ASSERT_EQUAL_STRING(expected, stuffed);
+    free(stuffed);
+}
+
+void test_dot_stuff(void) {
+    TEST_ASSERT_NULL(dot_stuff(NULL));
+    assert_stuffed("", "");
+    assert_stuffed("Hello", "Hello");
+    assert_stuffed("a.b. c.", "a.b. c.");
+
+    // Leading periods are doubled, on the first line and every later one.
+    assert_stuffed("..Hello\r\nWorld", ".Hello\nWorld");
+    assert_stuffed("Hello\r\n..World\r\n...", "Hello\n.World\n..");
+    assert_stuffed("..\r\n", ".\n");
+    assert_stuffed("\r\n..\r\n", "\n.\n");
+    // A body containing the end-of-data sequence cannot end the message early.
+    assert_stuffed("one\r\n..\r\ntwo\r\n", "one\r\n.\r\ntwo\r\n");
+
+    // Every line ending goes out as CRLF.
+    assert_stuffed("one\r\ntwo\r\n", "one\ntwo\n");
+    assert_stuffed("one\r\ntwo\r\n", "one\r\ntwo\r\n");
+    assert_stuffed("bare\r\ncr", "bare\rcr");
+    assert_stuffed("\r\n\r\n", "\r\r\n");
+    assert_stuffed("\r\n\r\n..x", "\n\n.x");
+    assert_stuffed("..\r\n..", ".\r.");
+}
+
+void test_build_data_payload(void) {
+    // A body piped in by echo ends with a bare LF.
+    char *payload = build_data_payload("me@boisestate.edu", "you@example.com", "hello",
+                                       "This is the message body.\n");
+    TEST_ASSERT_NOT_NULL(payload);
+    TEST_ASSERT_EQUAL_STRING("From: me@boisestate.edu\r\n"
+                             "To: you@example.com\r\n"
+                             "Subject: hello\r\n"
+                             "\r\n"
+                             "This is the message body.\r\n"
+                             ".\r\n", payload);
+    free(payload);
+
+    payload = build_data_payload("me@example.com", "you@example.com", "Test", "Hello\n.World");
+    TEST_ASSERT_NOT_NULL(payload);
+    TEST_ASSERT_EQUAL_STRING("From: me@example.com\r\n"
+                             "To: you@example.com\r\n"
+                             "Subject: Test\r\n"
+                             "\r\n"
+                             "Hello\r\n"
+                             "..World\r\n"
+                             ".\r\n", payload);
+    free(payload);
+
+    // A body that already ends with CRLF gets no extra blank line.
+    payload = build_data_payload("me@example.com", "you@example.com", "", "Ends with CRLF\r\n");
+    TEST_ASSERT_NOT_NULL(payload);
+    TEST_ASSERT_EQUAL_STRING("From: me@example.com\r\n"
+                             "To: you@example.com\r\n"
+                             "Subject: \r\n"
+                             "\r\n"
+                             "Ends with CRLF\r\n"
+                             ".\r\n", payload);
+    free(payload);
+
+    // A NULL subject is the same as an empty one, a NULL body the same as "".
+    const char *empty = "From: me@example.com\r\n"
+                        "To: you@example.com\r\n"
+                        "Subject: \r\n"
+                        "\r\n"
+                        ".\r\n";
+    payload = build_data_payload("me@example.com", "you@example.com", NULL, NULL);
+    TEST_ASSERT_NOT_NULL(payload);
+    TEST_ASSERT_EQUAL_STRING(empty, payload);
+    free(payload);
+
+    payload = build_data_payload("me@example.com", "you@example.com", "", "");
+    TEST_ASSERT_NOT_NULL(payload);
+    TEST_ASSERT_EQUAL_STRING(empty, payload);
+    free(payload);
+
+    // A body that is only a period.
+    payload = build_data_payload("a@b.c", "d@e.f", "s", ".");
+    TEST_ASSERT_NOT_NULL(payload);
+    TEST_ASSERT_EQUAL_STRING("From: a@b.c\r\nTo: d@e.f\r\nSubject: s\r\n\r\n..\r\n.\r\n", payload);
+    free(payload);
+
+    TEST_ASSERT_NULL(build_data_payload(NULL, "you@example.com", "s", "b"));
+    TEST_ASSERT_NULL(build_data_payload("me@example.com", NULL, "s", "b"));
+    TEST_ASSERT_NULL(build_data_payload("me@example.com\r\nBcc: x", "you@example.com", "s", "b"));
+    TEST_ASSERT_NULL(build_data_payload("me@example.com", "you@example.com\n", "s", "b"));
+    TEST_ASSERT_NULL(build_data_payload("me@example.com", "you@example.com", "hi\r\nBcc: x", "b"));
+}
+
+/* ------------------------------------------------------------------------
+ * LAYER 2: The session
+ * ------------------------------------------------------------------------ */
+
+void test_transport_init(void) {
+    mock_t m;
+    transport_t t;
+    t.len = 42;
+    transport_init(&t, mock_read, mock_write, &m);
+    TEST_ASSERT_TRUE(t.read == mock_read);
+    TEST_ASSERT_TRUE(t.write == mock_write);
+    TEST_ASSERT_TRUE(t.ctx == &m);
+    TEST_ASSERT_EQUAL_size_t(0, t.len);
+
+    transport_init(NULL, mock_read, mock_write, &m); // must not crash
+}
+
+void test_read_line(void) {
+    mock_t m;
+    transport_t t;
+    char line[64];
+
+    // CRLF and bare LF both end a line, and neither is returned.
+    mock_start(&m, &t, "220 hello\r\n250 bare lf\n\r\n\n", 0);
+    TEST_ASSERT_EQUAL_INT(9, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("220 hello", line);
+    TEST_ASSERT_EQUAL_INT(11, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250 bare lf", line);
+    TEST_ASSERT_EQUAL_INT(0, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("", line);
+    TEST_ASSERT_EQUAL_INT(0, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("", line);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_line(&t, line, sizeof(line)));
+}
+
+void test_read_line_several_lines_in_one_read(void) {
+    mock_t m;
+    transport_t t;
+    char line[64];
+
+    mock_start(&m, &t, "250-one\r\n250-two\r\n250 three\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(7, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250-one", line);
+    TEST_ASSERT_EQUAL_INT(7, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250-two", line);
+    TEST_ASSERT_EQUAL_INT(9, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250 three", line);
+    // The buffer is refilled only when it does not already hold a line.
+    TEST_ASSERT_EQUAL_INT(1, m.reads);
+}
+
+void test_read_line_a_few_bytes_at_a_time(void) {
+    for (size_t chunk = 1; chunk <= 12; chunk++) {
+        mock_t m;
+        transport_t t;
+        char line[64];
+
+        mock_start(&m, &t, "220 smtp.example.com ESMTP\r\n250 OK\r\n", chunk);
+        TEST_ASSERT_EQUAL_INT(26, read_line(&t, line, sizeof(line)));
+        TEST_ASSERT_EQUAL_STRING("220 smtp.example.com ESMTP", line);
+        TEST_ASSERT_EQUAL_INT(6, read_line(&t, line, sizeof(line)));
+        TEST_ASSERT_EQUAL_STRING("250 OK", line);
+        TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_line(&t, line, sizeof(line)));
+    }
+
+    // A CR and its LF split across two reads are still one line ending.
+    mock_t m;
+    transport_t t;
+    char line[64];
+    mock_start(&m, &t, "250 OK\r\n", 7);
+    TEST_ASSERT_EQUAL_INT(6, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250 OK", line);
+}
+
+void test_read_line_too_long_for_caller(void) {
+    mock_t m;
+    transport_t t;
+    char line[8];
+
+    // "250 OK1" needs 8 bytes with its NUL, "250 OK12" needs 9.
+    mock_start(&m, &t, "250 OK1\r\n250 OK12\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(7, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("250 OK1", line);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_line(&t, line, sizeof(line)));
+}
+
+void test_read_line_too_long_for_buffer(void) {
+    // A line that just fits: SMTP_LINE_MAX bytes including its CRLF.
+    char *script = malloc(2 * SMTP_LINE_MAX + 16);
+    TEST_ASSERT_NOT_NULL(script);
+    memset(script, 'a', SMTP_LINE_MAX - 2);
+    strcpy(script + SMTP_LINE_MAX - 2, "\r\n");
+
+    mock_t m;
+    transport_t t;
+    char line[2 * SMTP_LINE_MAX];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_LINE_MAX - 2, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_size_t(SMTP_LINE_MAX - 2, strlen(line));
+
+    // One byte more and the buffer fills up before the line ends.
+    memset(script, 'a', SMTP_LINE_MAX + 5);
+    strcpy(script + SMTP_LINE_MAX + 5, "\r\n");
+    mock_start(&m, &t, script, 100);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_line(&t, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_size_t(SMTP_LINE_MAX, t.len);
+
+    free(script);
+}
+
+void test_read_line_errors(void) {
+    mock_t m;
+    transport_t t;
+    char line[64];
+
+    mock_start(&m, &t, "220 OK\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_line(NULL, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_line(&t, NULL, sizeof(line)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_line(&t, line, 0));
+    transport_init(&t, NULL, mock_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_line(&t, line, sizeof(line)));
+
+    // The server hangs up before sending anything, or halfway through a line.
+    mock_start(&m, &t, "", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_line(&t, line, sizeof(line)));
+    mock_start(&m, &t, "220 no line ending", 4);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_line(&t, line, sizeof(line)));
+
+    // The read callback fails, or claims more bytes than it was given room for.
+    mock_start(&m, &t, "220 partial", 0);
+    m.fail_at_end = true;
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, read_line(&t, line, sizeof(line)));
+    transport_init(&t, failing_read, mock_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, read_line(&t, line, sizeof(line)));
+    transport_init(&t, oversized_read, mock_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, read_line(&t, line, sizeof(line)));
+}
+
+void test_read_full_reply_single_line(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    mock_start(&m, &t, "220 smtp.example.com ESMTP ready\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(220, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("220 smtp.example.com ESMTP ready", reply);
+
+    // A reply may be nothing but the code.
+    mock_start(&m, &t, "250\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(250, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250", reply);
+}
+
+void test_read_full_reply_multi_line(void) {
+    const char *script = "250-smtp.example.com\r\n"
+                         "250-PIPELINING\r\n"
+                         "250 SIZE 10240000\r\n"
+                         "221 Bye\r\n";
+
+    // Delivered all at once and a few bytes at a time.
+    for (size_t chunk = 0; chunk <= 8; chunk++) {
+        mock_t m;
+        transport_t t;
+        char reply[256];
+
+        mock_start(&m, &t, script, chunk);
+        TEST_ASSERT_EQUAL_INT(250, read_full_reply(&t, reply, sizeof(reply)));
+        TEST_ASSERT_EQUAL_STRING("250-smtp.example.com\n250-PIPELINING\n250 SIZE 10240000", reply);
+
+        // The reply stops at its last line; the next reply is untouched.
+        TEST_ASSERT_EQUAL_INT(221, read_full_reply(&t, reply, sizeof(reply)));
+        TEST_ASSERT_EQUAL_STRING("221 Bye", reply);
+    }
+}
+
+void test_read_full_reply_malformed(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    // Not a reply at all; the text is kept so it can be reported.
+    mock_start(&m, &t, "hello there\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_SYNTAX, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("hello there", reply);
+
+    // A bad line in the middle of a multi-line reply.
+    mock_start(&m, &t, "250-one\r\nbogus\r\n250 three\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_SYNTAX, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250-one\nbogus", reply);
+
+    // The lines of one reply disagree about the code.
+    mock_start(&m, &t, "250-one\r\n554 two\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_SYNTAX, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250-one\n554 two", reply);
+}
+
+void test_read_full_reply_too_long(void) {
+    mock_t m;
+    transport_t t;
+    char reply[16];
+
+    // "250-first\n250 end" is 17 bytes plus the NUL.
+    const char *script = "250-first\r\n250 end\r\n";
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250-first", reply);
+
+    char exact[18];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(250, read_full_reply(&t, exact, sizeof(exact)));
+    TEST_ASSERT_EQUAL_STRING("250-first\n250 end", exact);
+
+    char short_by_one[17];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_full_reply(&t, short_by_one, sizeof(short_by_one)));
+
+    // A single line that does not fit.
+    char tiny[4];
+    mock_start(&m, &t, "250 OK\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_full_reply(&t, tiny, sizeof(tiny)));
+    TEST_ASSERT_EQUAL_STRING("", tiny);
+
+    // A line longer than the line reader's buffer.
+    char *big = malloc(SMTP_LINE_MAX + 16);
+    TEST_ASSERT_NOT_NULL(big);
+    memcpy(big, "250 ", 4);
+    memset(big + 4, 'x', SMTP_LINE_MAX);
+    strcpy(big + 4 + SMTP_LINE_MAX, "\r\n");
+    char large[4 * SMTP_LINE_MAX];
+    mock_start(&m, &t, big, 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_TOO_LONG, read_full_reply(&t, large, sizeof(large)));
+    free(big);
+}
+
+void test_read_full_reply_hang_up(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    mock_start(&m, &t, "", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_full_reply(&t, reply, sizeof(reply)));
+
+    // The server hangs up after a continuation line.
+    mock_start(&m, &t, "250-smtp.example.com\r\n250-PIPE", 3);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, read_full_reply(&t, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250-smtp.example.com", reply);
+
+    mock_start(&m, &t, "250-smtp.example.com\r\n", 0);
+    m.fail_at_end = true;
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, read_full_reply(&t, reply, sizeof(reply)));
+}
+
+void test_read_full_reply_args(void) {
+    mock_t m;
+    transport_t t;
+    char reply[16];
+
+    mock_start(&m, &t, "250 OK\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_full_reply(NULL, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_full_reply(&t, NULL, sizeof(reply)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, read_full_reply(&t, reply, 0));
+    TEST_ASSERT_EQUAL_INT(0, m.reads);
+}
+
+void test_write_all(void) {
+    const char *data = "MAIL FROM:<me@boisestate.edu>\r\n";
+
+    // Whole writes and short writes both deliver every byte.
+    for (size_t chunk = 0; chunk <= 5; chunk++) {
+        mock_t m;
+        transport_t t;
+        mock_start(&m, &t, "", 0);
+        m.write_chunk = chunk;
+        TEST_ASSERT_EQUAL_INT(0, write_all(&t, data, strlen(data)));
+        TEST_ASSERT_EQUAL_STRING(data, m.sent);
+    }
+
+    mock_t m;
+    transport_t t;
+    mock_start(&m, &t, "", 0);
+    m.write_chunk = 1;
+    TEST_ASSERT_EQUAL_INT(0, write_all(&t, data, strlen(data)));
+    TEST_ASSERT_EQUAL_INT((int)strlen(data), m.writes);
+
+    // Nothing to write means no write call.
+    mock_start(&m, &t, "", 0);
+    TEST_ASSERT_EQUAL_INT(0, write_all(&t, data, 0));
+    TEST_ASSERT_EQUAL_INT(0, m.writes);
+
+    // A write that fails after a short write.
+    mock_start(&m, &t, "", 0);
+    m.write_chunk = 4;
+    m.fail_write_at = 2;
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, write_all(&t, data, strlen(data)));
+    TEST_ASSERT_EQUAL_STRING("MAIL", m.sent);
+
+    transport_init(&t, mock_read, failing_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, write_all(&t, data, strlen(data)));
+    transport_init(&t, mock_read, zero_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, write_all(&t, data, strlen(data)));
+    transport_init(&t, mock_read, oversized_write, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, write_all(&t, data, strlen(data)));
+
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, write_all(NULL, data, strlen(data)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, write_all(&t, NULL, 3));
+    transport_init(&t, mock_read, NULL, &m);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, write_all(&t, data, strlen(data)));
+}
+
+void test_expect_reply(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    mock_start(&m, &t, "220 ready\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(0, expect_reply(&t, 220, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("220 ready", reply);
+
+    mock_start(&m, &t, "554-no\r\n554 go away\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_UNEXPECTED, expect_reply(&t, 220, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("554-no\n554 go away", reply);
+
+    mock_start(&m, &t, "220 rea", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, expect_reply(&t, 220, reply, sizeof(reply)));
+
+    mock_start(&m, &t, "junk\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_SYNTAX, expect_reply(&t, 220, reply, sizeof(reply)));
+
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, expect_reply(NULL, 220, reply, sizeof(reply)));
+}
+
+void test_send_command(void) {
+    mock_t m;
+    transport_t t;
+    char reply[256];
+
+    mock_start(&m, &t, "250 smtp.example.com\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(0, send_command(&t, "HELO localhost\r\n", 250, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("HELO localhost\r\n", m.sent);
+    TEST_ASSERT_EQUAL_STRING("250 smtp.example.com", reply);
+
+    mock_start(&m, &t, "250 OK\r\n", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_UNEXPECTED, send_command(&t, "DATA\r\n", 354, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("250 OK", reply);
+
+    mock_start(&m, &t, "", 0);
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_CLOSED, send_command(&t, "QUIT\r\n", 221, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_STRING("QUIT\r\n", m.sent);
+
+    // When the write fails, no reply is read.
+    mock_start(&m, &t, "250 OK\r\n", 0);
+    m.fail_write_at = 1;
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_IO, send_command(&t, "HELO localhost\r\n", 250, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_INT(0, m.reads);
+
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, send_command(&t, NULL, 250, reply, sizeof(reply)));
+    TEST_ASSERT_EQUAL_INT(SMTP_ERR_ARG, send_command(NULL, "QUIT\r\n", 221, reply, sizeof(reply)));
+}
+
+static void assert_session_ok(const char *script, size_t read_chunk, size_t write_chunk) {
+    mock_t m;
+    transport_t t;
+    char err[256];
+    char transcript[2048];
+
+    mock_start(&m, &t, script, read_chunk);
+    m.write_chunk = write_chunk;
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("", err);
+    build_transcript(transcript, sizeof(transcript), STEPS);
+    TEST_ASSERT_EQUAL_STRING(transcript, m.sent);
+    TEST_ASSERT_EQUAL_size_t(m.len, m.pos); // every reply was consumed
+}
+
+void test_run_smtp_session_happy(void) {
+    char script[2048];
+    build_script(script, sizeof(script), -1, NULL);
+
+    // The exact bytes the client sends, in order.
+    mock_t m;
+    transport_t t;
+    char err[256];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("", err);
+    TEST_ASSERT_EQUAL_STRING("HELO onyx.boisestate.edu\r\n"
+                             "MAIL FROM:<me@boisestate.edu>\r\n"
+                             "RCPT TO:<you@example.com>\r\n"
+                             "DATA\r\n"
+                             "From: me@boisestate.edu\r\n"
+                             "To: you@example.com\r\n"
+                             "Subject: hello\r\n"
+                             "\r\n"
+                             "This is the message body.\r\n"
+                             ".\r\n"
+                             "QUIT\r\n", m.sent);
+
+    // The same session with replies and writes split into small pieces.
+    for (size_t chunk = 1; chunk <= 7; chunk++) {
+        assert_session_ok(script, chunk, 0);
+        assert_session_ok(script, 0, chunk);
+    }
+}
+
+void test_run_smtp_session_multi_line_replies(void) {
+    const char *script = "220-smtp.example.com ESMTP ready\r\n"
+                         "220 no UCE\r\n"
+                         "250-smtp.example.com\r\n"
+                         "250-PIPELINING\r\n"
+                         "250 SIZE 10240000\r\n"
+                         "250 2.1.0 Ok\r\n"
+                         "250 2.1.5 Ok\r\n"
+                         "354 End data with <CR><LF>.<CR><LF>\r\n"
+                         "250-2.0.0 Ok\r\n"
+                         "250 2.0.0 queued as 12345\r\n"
+                         "221 2.0.0 Bye\r\n";
+    assert_session_ok(script, 0, 0);
+    assert_session_ok(script, 3, 0);
+}
+
+void test_run_smtp_session_dot_stuffing(void) {
+    char script[2048];
+    build_script(script, sizeof(script), -1, NULL);
+
+    smtp_message_t msg = good_msg;
+    msg.subject = NULL;
+    msg.body = ".starts with a dot\n.\nlast line";
+
+    mock_t m;
+    transport_t t;
+    char err[256];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &msg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(m.sent,
+                                "DATA\r\n"
+                                "From: me@boisestate.edu\r\n"
+                                "To: you@example.com\r\n"
+                                "Subject: \r\n"
+                                "\r\n"
+                                "..starts with a dot\r\n"
+                                "..\r\n"
+                                "last line\r\n"
+                                ".\r\n"
+                                "QUIT\r\n"));
+}
+
+// Replaces the reply at each step with `reply` and checks that the client
+// reports it and stops without sending anything more.
+static void assert_each_step_rejects(const char *(*reply_for)(int step)) {
+    for (int step = 0; step < STEPS; step++) {
+        const char *reply = reply_for(step);
+        char script[2048];
+        char transcript[2048];
+        char err[512];
+        build_script(script, sizeof(script), step, reply);
+        build_transcript(transcript, sizeof(transcript), step);
+
+        mock_t m;
+        transport_t t;
+        mock_start(&m, &t, script, 0);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(2, run_smtp_session(&t, &good_msg, err, sizeof(err)), step_names[step]);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(transcript, m.sent, step_names[step]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, step_names[step]), err);
+
+        // The message names the code that was required and quotes the reply,
+        // whose lines the client reports without their CRLF.
+        char quoted[128];
+        size_t q = 0;
+        for (const char *p = reply; *p && q < sizeof(quoted) - 1; p++) {
+            if (*p != '\r') quoted[q++] = *p;
+        }
+        quoted[q - 1] = '\0'; // drop the final LF
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, quoted), err);
+        char want[32];
+        snprintf(want, sizeof(want), "expected %.3s", good_replies[step]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, want), err);
+    }
+}
+
+static const char *permanent_failure(int step) {
+    (void)step;
+    return "554 5.7.1 Rejected\r\n";
+}
+
+static const char *transient_failure(int step) {
+    (void)step;
+    return "421 4.3.2 Service not available\r\n";
+}
+
+// A valid reply, but the one that belongs to some other step.
+static const char *code_from_wrong_step(int step) {
+    static const char *wrong[STEPS] = {
+        "250 not a greeting\r\n",
+        "220 not a HELO reply\r\n",
+        "354 not a MAIL reply\r\n",
+        "251 User not local; will forward\r\n",
+        "250 not a DATA reply\r\n",
+        "354 not a queued reply\r\n",
+        "250 not a QUIT reply\r\n",
+    };
+    return wrong[step];
+}
+
+static const char *multi_line_failure(int step) {
+    (void)step;
+    return "550-5.1.1 Mailbox unavailable\r\n550 5.1.1 Try again later\r\n";
+}
+
+void test_run_smtp_session_wrong_codes(void) {
+    assert_each_step_rejects(permanent_failure);
+    assert_each_step_rejects(transient_failure);
+    assert_each_step_rejects(code_from_wrong_step);
+}
+
+void test_run_smtp_session_multi_line_rejection(void) {
+    assert_each_step_rejects(multi_line_failure);
+
+    char script[2048];
+    char err[512];
+    build_script(script, sizeof(script), 3, multi_line_failure(3));
+    mock_t m;
+    transport_t t;
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("RCPT TO: expected 250 but the server replied: "
+                             "550-5.1.1 Mailbox unavailable\n550 5.1.1 Try again later", err);
+}
+
+void test_run_smtp_session_hang_up(void) {
+    for (int step = 0; step < STEPS; step++) {
+        char transcript[2048];
+        build_transcript(transcript, sizeof(transcript), step);
+
+        // The server hangs up instead of replying, and halfway through a reply.
+        for (int partial = 0; partial < 2; partial++) {
+            char script[2048];
+            char err[512];
+            build_script(script, sizeof(script), step, NULL);
+            if (partial) strncat(script, good_replies[step], 5);
+
+            mock_t m;
+            transport_t t;
+            mock_start(&m, &t, script, 2);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(2, run_smtp_session(&t, &good_msg, err, sizeof(err)), step_names[step]);
+            TEST_ASSERT_EQUAL_STRING_MESSAGE(transcript, m.sent, step_names[step]);
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, step_names[step]), err);
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "closed the connection"), err);
+        }
+    }
+}
+
+void test_run_smtp_session_malformed_reply(void) {
+    char script[2048];
+    char err[512];
+    mock_t m;
+    transport_t t;
+
+    build_script(script, sizeof(script), 0, "SSH-2.0-OpenSSH_9.6\r\n");
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("greeting: the server sent a malformed reply: SSH-2.0-OpenSSH_9.6", err);
+    TEST_ASSERT_EQUAL_STRING("", m.sent);
+
+    build_script(script, sizeof(script), 4, "354-go\r\n250 ahead\r\n");
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "DATA: the server sent a malformed reply"));
+}
+
+void test_run_smtp_session_reply_too_long(void) {
+    char *script = malloc(SMTP_LINE_MAX + 16);
+    TEST_ASSERT_NOT_NULL(script);
+    memcpy(script, "220 ", 4);
+    memset(script + 4, 'x', SMTP_LINE_MAX);
+    strcpy(script + 4 + SMTP_LINE_MAX, "\r\n");
+
+    mock_t m;
+    transport_t t;
+    char err[512];
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("greeting: the server's reply is too long", err);
+    TEST_ASSERT_EQUAL_STRING("", m.sent);
+    free(script);
+}
+
+void test_run_smtp_session_io_errors(void) {
+    char script[2048];
+    char err[512];
+    mock_t m;
+    transport_t t;
+
+    // A read fails partway through the session.
+    build_script(script, sizeof(script), 2, NULL);
+    mock_start(&m, &t, script, 0);
+    m.fail_at_end = true;
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("MAIL FROM: error reading from or writing to the connection", err);
+
+    // A write fails: the RCPT TO command is the third write.
+    build_script(script, sizeof(script), -1, NULL);
+    mock_start(&m, &t, script, 0);
+    m.fail_write_at = 3;
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("RCPT TO: error reading from or writing to the connection", err);
+    build_transcript(script, sizeof(script), 2);
+    TEST_ASSERT_EQUAL_STRING(script, m.sent);
+}
+
+void test_run_smtp_session_invalid_message(void) {
+    char script[2048];
+    char err[512];
+    build_script(script, sizeof(script), -1, NULL);
+
+    smtp_message_t bad[6];
+    for (int i = 0; i < 6; i++) bad[i] = good_msg;
+    bad[0].helo = NULL;
+    bad[1].from = NULL;
+    bad[2].to = "you@example.com\r\nRCPT TO:<other@example.com>";
+    bad[3].subject = "hi\r\nBcc: other@example.com";
+    bad[4].helo = "onyx\nRSET";
+    bad[5].from = "me@boisestate.edu>\r\nRSET";
+
+    // Nothing is read or written for a message that cannot be sent safely.
+    for (int i = 0; i < 6; i++) {
+        mock_t m;
+        transport_t t;
+        mock_start(&m, &t, script, 0);
+        TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &bad[i], err, sizeof(err)));
+        TEST_ASSERT_NOT_NULL(strstr(err, "invalid message"));
+        TEST_ASSERT_EQUAL_INT(0, m.reads);
+        TEST_ASSERT_EQUAL_INT(0, m.writes);
+    }
+
+    // A missing subject and body are fine.
+    smtp_message_t minimal = good_msg;
+    minimal.subject = NULL;
+    minimal.body = NULL;
+    mock_t m;
+    transport_t t;
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &minimal, err, sizeof(err)));
+}
+
+void test_run_smtp_session_args(void) {
+    char script[2048];
+    char err[512];
+    build_script(script, sizeof(script), -1, NULL);
+    mock_t m;
+    transport_t t;
+    mock_start(&m, &t, script, 0);
+
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(NULL, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("no transport or message", err);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, NULL, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("no transport or message", err);
+
+    // The error buffer is optional.
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(NULL, &good_msg, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &good_msg, err, 0));
+
+    // A long reply is cut to fit the error buffer, which stays terminated.
+    char small[16];
+    build_script(script, sizeof(script), 0, "554 this reply is much longer than sixteen bytes\r\n");
+    mock_start(&m, &t, script, 0);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, small, sizeof(small)));
+    TEST_ASSERT_EQUAL_STRING("greeting: expec", small);
+}
+
+/* ------------------------------------------------------------------------
+ * LAYER 3: The socket transport
+ * ------------------------------------------------------------------------ */
+
+// Opens a TCP socket on an unused loopback port and writes the port number
+// into port. The socket listens only when asked to.
+static int loopback_socket(char *port, size_t size, bool listening) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE(s >= 0);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    TEST_ASSERT_EQUAL_INT(0, bind(s, (struct sockaddr *)&addr, sizeof(addr)));
+    if (listening) TEST_ASSERT_EQUAL_INT(0, listen(s, 1));
+
+    socklen_t len = sizeof(addr);
+    TEST_ASSERT_EQUAL_INT(0, getsockname(s, (struct sockaddr *)&addr, &len));
+    snprintf(port, size, "%u", (unsigned)ntohs(addr.sin_port));
+    return s;
+}
+
+void test_socket_read_write(void) {
+    char port[16];
+    char err[256];
+    int listener = loopback_socket(port, sizeof(port), true);
+
+    int client = socket_connect("127.0.0.1", port, err, sizeof(err));
+    TEST_ASSERT_TRUE_MESSAGE(client >= 0, err);
+    int server = accept(listener, NULL, NULL);
+    TEST_ASSERT_TRUE(server >= 0);
+
+    char buf[64];
+    TEST_ASSERT_EQUAL_INT(6, (int)socket_write(&client, "HELO\r\n", 6));
+    TEST_ASSERT_EQUAL_INT(6, (int)socket_read(&server, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_MEMORY("HELO\r\n", buf, 6);
+
+    TEST_ASSERT_EQUAL_INT(8, (int)socket_write(&server, "250 OK\r\n", 8));
+    TEST_ASSERT_EQUAL_INT(8, (int)socket_read(&client, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_MEMORY("250 OK\r\n", buf, 8);
+
+    // A hang-up reads as zero bytes.
+    close(server);
+    TEST_ASSERT_EQUAL_INT(0, (int)socket_read(&client, buf, sizeof(buf)));
+
+    close(client);
+    close(listener);
+
+    // Both wrappers pass failures through.
+    int bad = -1;
+    TEST_ASSERT_EQUAL_INT(-1, (int)socket_read(&bad, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_INT(-1, (int)socket_write(&bad, "x", 1));
+}
+
+void test_socket_session(void) {
+    char port[16];
+    char err[256];
+    int listener = loopback_socket(port, sizeof(port), true);
+
+    int client = socket_connect("127.0.0.1", port, err, sizeof(err));
+    TEST_ASSERT_TRUE_MESSAGE(client >= 0, err);
+    int server = accept(listener, NULL, NULL);
+    TEST_ASSERT_TRUE(server >= 0);
+
+    // The server queues all of its replies up front; the client reads them
+    // one at a time, just as it would from a real server.
+    char script[2048];
+    build_script(script, sizeof(script), -1, NULL);
+    TEST_ASSERT_EQUAL_INT((int)strlen(script), (int)write(server, script, strlen(script)));
+
+    transport_t t;
+    transport_init(&t, socket_read, socket_write, &client);
+    TEST_ASSERT_EQUAL_INT(0, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    close(client);
+
+    // Everything the client sent, read until it hung up.
+    char sent[2048];
+    size_t got = 0;
+    ssize_t n;
+    while ((n = read(server, sent + got, sizeof(sent) - 1 - got)) > 0) {
+        got += (size_t)n;
+    }
+    sent[got] = '\0';
+    char transcript[2048];
+    build_transcript(transcript, sizeof(transcript), STEPS);
+    TEST_ASSERT_EQUAL_STRING(transcript, sent);
+
+    close(server);
+    close(listener);
+}
+
+void test_socket_session_server_hangs_up(void) {
+    char port[16];
+    char err[256];
+    int listener = loopback_socket(port, sizeof(port), true);
+
+    int client = socket_connect("127.0.0.1", port, err, sizeof(err));
+    TEST_ASSERT_TRUE_MESSAGE(client >= 0, err);
+    int server = accept(listener, NULL, NULL);
+    TEST_ASSERT_TRUE(server >= 0);
+
+    // The server greets, then goes away before the reply to HELO.
+    size_t greeting_len = strlen(good_replies[0]);
+    TEST_ASSERT_EQUAL_INT((int)greeting_len, (int)write(server, good_replies[0], greeting_len));
+    close(server);
+
+    transport_t t;
+    transport_init(&t, socket_read, socket_write, &client);
+    TEST_ASSERT_EQUAL_INT(2, run_smtp_session(&t, &good_msg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "HELO: "), err);
+
+    close(client);
+    close(listener);
+}
+
+void test_socket_connect_refused(void) {
+    // Bound but not listening, so a connection attempt is refused.
+    char port[16];
+    char err[256];
+    int s = loopback_socket(port, sizeof(port), false);
+
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect("127.0.0.1", port, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "cannot connect to 127.0.0.1 port "), err);
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect("127.0.0.1", port, NULL, 0));
+    close(s);
+}
+
+void test_socket_connect_bad_address(void) {
+    char err[256];
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect("127.0.0.1", "no-such-service", err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "cannot resolve 127.0.0.1 port no-such-service"), err);
+
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect(NULL, "25", err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("no server or port given", err);
+    TEST_ASSERT_EQUAL_INT(-1, socket_connect("127.0.0.1", NULL, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("no server or port given", err);
 }
 
 int main(void) {
-  UNITY_BEGIN();
-  RUN_TEST(test_get_greeting);
-  return UNITY_END();
+    // A write to a socket the peer closed must fail, not kill the tests.
+    signal(SIGPIPE, SIG_IGN);
+
+    UNITY_BEGIN();
+    RUN_TEST(test_has_crlf);
+    RUN_TEST(test_parse_reply_code);
+    RUN_TEST(test_is_final_reply_line);
+    RUN_TEST(test_build_command);
+    RUN_TEST(test_build_envelope_command);
+    RUN_TEST(test_dot_stuff);
+    RUN_TEST(test_build_data_payload);
+    RUN_TEST(test_transport_init);
+    RUN_TEST(test_read_line);
+    RUN_TEST(test_read_line_several_lines_in_one_read);
+    RUN_TEST(test_read_line_a_few_bytes_at_a_time);
+    RUN_TEST(test_read_line_too_long_for_caller);
+    RUN_TEST(test_read_line_too_long_for_buffer);
+    RUN_TEST(test_read_line_errors);
+    RUN_TEST(test_read_full_reply_single_line);
+    RUN_TEST(test_read_full_reply_multi_line);
+    RUN_TEST(test_read_full_reply_malformed);
+    RUN_TEST(test_read_full_reply_too_long);
+    RUN_TEST(test_read_full_reply_hang_up);
+    RUN_TEST(test_read_full_reply_args);
+    RUN_TEST(test_write_all);
+    RUN_TEST(test_expect_reply);
+    RUN_TEST(test_send_command);
+    RUN_TEST(test_run_smtp_session_happy);
+    RUN_TEST(test_run_smtp_session_multi_line_replies);
+    RUN_TEST(test_run_smtp_session_dot_stuffing);
+    RUN_TEST(test_run_smtp_session_wrong_codes);
+    RUN_TEST(test_run_smtp_session_multi_line_rejection);
+    RUN_TEST(test_run_smtp_session_hang_up);
+    RUN_TEST(test_run_smtp_session_malformed_reply);
+    RUN_TEST(test_run_smtp_session_reply_too_long);
+    RUN_TEST(test_run_smtp_session_io_errors);
+    RUN_TEST(test_run_smtp_session_invalid_message);
+    RUN_TEST(test_run_smtp_session_args);
+    RUN_TEST(test_socket_read_write);
+    RUN_TEST(test_socket_session);
+    RUN_TEST(test_socket_session_server_hangs_up);
+    RUN_TEST(test_socket_connect_refused);
+    RUN_TEST(test_socket_connect_bad_address);
+    return UNITY_END();
 }
 
 ```
 
 ## Scripts Files
-Report generated on 08/27/2026 at 01:52:05
+Report generated on 09/19/2026 at 05:47:24
 
 
 ---
 
 ## End of Report
 
-SHA-256 Hash of the report: 17f895a2e90154df5bbec93a8c2971029962e980cdb26a2f782e72e29687525c
+SHA-256 Hash of the report: 6c8e52a956b12b2f5946778893d1b2c0ffa2532afc4422393e8cf67171a14623
 
 Do not edit the generated report. Any changes will be reported as academic dishonesty
 
 ---
 ## GitHub Info
-- GitHub repo name: shanep/makefile-project-starter
+- GitHub repo name: mevcaus/cs425-p1
 - The repository visibility is public.
-- The workflow was triggered by shanep
+- The workflow was triggered by mevcaus
